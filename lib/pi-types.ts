@@ -77,6 +77,8 @@ interface ExtensionRunnerLike {
 type DialogOptionsLike = {
   signal?: AbortSignal;
   timeout?: number;
+  /** Render the input dialog as a masked password field. */
+  secret?: boolean;
 };
 
 type WidgetOptionsLike = {

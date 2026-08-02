@@ -938,6 +938,7 @@ function ExtensionDialog({
             <input
               autoFocus
               value={value}
+              type={request.secret ? "password" : "text"}
               placeholder={request.placeholder}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {

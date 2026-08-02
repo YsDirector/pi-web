@@ -899,7 +899,7 @@ export class AgentSessionWrapper {
         opts?.signal,
       ),
       input: (title, placeholder, opts) => this.requestExtensionUi(
-        { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
+        { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}), ...(opts?.secret ? { secret: opts.secret } : {}) },
         undefined,
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,

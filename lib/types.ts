@@ -136,6 +136,8 @@ export type ExtensionUiRequest =
       placeholder?: string;
       timeout?: number;
       expiresAt?: number;
+      /** Render the input field as a masked password field. */
+      secret?: boolean;
     }
   | {
       type: "extension_ui_request";
