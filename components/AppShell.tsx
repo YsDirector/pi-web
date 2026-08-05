@@ -12,6 +12,7 @@ import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { BranchNavigator } from "./BranchNavigator";
+import { TodoModal } from "./TodoModal";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -33,6 +34,7 @@ import {
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { SessionTodos } from "@/lib/session-reader";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -150,6 +152,10 @@ export function AppShell() {
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
   const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
   const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
+
+  // Todo list modal + top-bar badge (current branch's todo snapshot)
+  const [todoModalOpen, setTodoModalOpen] = useState(false);
+  const [todoSnapshot, setTodoSnapshot] = useState<SessionTodos | null>(null);
 
   const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
     setBranchTree(tree);
@@ -414,6 +420,32 @@ export function AppShell() {
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
   }, []);
+
+  // Refresh the top-bar todo badge whenever the session, active branch, or an
+  // agent run changes. The modal itself polls while open.
+  const loadTodoSnapshot = useCallback(async () => {
+    const sessionId = selectedSession?.id;
+    if (!sessionId) {
+      setTodoSnapshot(null);
+      return;
+    }
+    const leafId = branchActiveLeafId;
+    const query = leafId ? `?leafId=${encodeURIComponent(leafId)}` : "";
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/todos${query}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+      const data = (await response.json()) as SessionTodos;
+      if (Array.isArray(data.todos)) setTodoSnapshot(data);
+    } catch {
+      // Keep the last known snapshot on transient failures.
+    }
+  }, [selectedSession?.id, branchActiveLeafId]);
+
+  useEffect(() => {
+    void loadTodoSnapshot();
+  }, [loadTodoSnapshot, refreshKey]);
 
   const handleAutoName = useCallback(async () => {
     const sessionId = selectedSession?.id;
@@ -1094,6 +1126,79 @@ export function AppShell() {
                   </button>
                 );
               })()}
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedSession) {
+                    setTodoModalOpen(true);
+                    void loadTodoSnapshot();
+                  }
+                }}
+                disabled={!selectedSession}
+                title={selectedSession ? translate("todo.show") : translate("todo.unsaved")}
+                aria-label={translate("todo.label")}
+                aria-haspopup="dialog"
+                aria-expanded={todoModalOpen}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  height: "100%", padding: "0 12px",
+                  background: "none", border: "none",
+                  borderTop: "2px solid transparent",
+                  borderRight: "1px solid var(--border)",
+                  color: selectedSession ? "var(--text-muted)" : "var(--text-dim)",
+                  cursor: selectedSession ? "pointer" : "not-allowed",
+                  opacity: selectedSession ? 1 : 0.45,
+                  flexShrink: 0, fontSize: 11, whiteSpace: "nowrap",
+                  transition: "color 0.1s, background 0.1s, opacity 0.1s",
+                }}
+                onMouseEnter={(e) => {
+                  if (!selectedSession) return;
+                  e.currentTarget.style.color = "var(--text)";
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color = selectedSession ? "var(--text-muted)" : "var(--text-dim)";
+                  e.currentTarget.style.background = "none";
+                }}
+              >
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{ color: selectedSession ? "var(--text-muted)" : "var(--text-dim)", flexShrink: 0 }}
+                >
+                  <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
+                  <rect x="9" y="3" width="6" height="4" rx="1" />
+                  <path d="m9 14 2 2 4-4" />
+                </svg>
+                {!isMobile && <span>{translate("todo.label")}</span>}
+                {selectedSession && (
+                  (() => {
+                    const pendingCount = todoSnapshot?.todos.filter((todo) => !todo.done).length ?? 0;
+                    if (pendingCount === 0) return null;
+                    return (
+                      <span
+                        style={{
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          minWidth: 16, height: 16, padding: "0 4px",
+                          borderRadius: 8,
+                          background: "var(--accent)",
+                          color: "#fff",
+                          fontSize: 10, fontWeight: 700, lineHeight: 1,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {pendingCount}
+                      </span>
+                    );
+                  })()
+                )}
+              </button>
               <BranchNavigator
                 tree={branchTree}
                 activeLeafId={branchActiveLeafId}
@@ -1635,6 +1740,13 @@ export function AppShell() {
       </svg>
     </button>
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
+    {todoModalOpen && selectedSession && (
+      <TodoModal
+        sessionId={selectedSession.id}
+        leafId={branchActiveLeafId}
+        onClose={() => setTodoModalOpen(false)}
+      />
+    )}
     {projectTrustDialogOpen && projectTrustCwd && (
       <ProjectTrustDialog
         cwd={projectTrustCwd}

@@ -201,6 +201,69 @@ export function getSessionEntries(filePath: string): SessionEntry[] {
   return entries as unknown as SessionEntry[];
 }
 
+// ============================================================================
+// Todo list — read from the branch-scoped `pi-deck-todo` custom entry written
+// by the pi-deck-todo extension (pi.appendEntry). Each entry stores the full
+// snapshot { todos, nextId }, so the last one on the active branch is the
+// authoritative state. Falls back to an empty list when absent.
+// ============================================================================
+
+export interface SessionTodoItem {
+  id: number;
+  text: string;
+  done: boolean;
+}
+
+export interface SessionTodos {
+  todos: SessionTodoItem[];
+  nextId: number;
+}
+
+const TODO_ENTRY_TYPE = "pi-deck-todo";
+
+function isTodoItem(value: unknown): value is SessionTodoItem {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "number"
+    && typeof record.text === "string"
+    && typeof record.done === "boolean"
+  );
+}
+
+/**
+ * Read the todo list for a branch of a session file.
+ * The state lives in a custom `pi-deck-todo` entry; we take the last snapshot.
+ * When `leafId` is provided, only entries on that leaf's ancestry are considered
+ * so the modal reflects the branch currently viewed in the chat.
+ */
+export function getSessionTodos(filePath: string, leafId?: string | null): SessionTodos {
+  const entries = getSessionEntries(filePath);
+  // Narrow to the requested branch: keep the leaf's parent chain (root → leaf).
+  let visibleIds: Set<string> | null = null;
+  if (leafId) {
+    const byId = new Map(entries.map((e) => [e.id, e]));
+    visibleIds = new Set();
+    let cursor = byId.get(leafId) ?? null;
+    while (cursor) {
+      visibleIds.add(cursor.id);
+      cursor = cursor.parentId ? (byId.get(cursor.parentId) ?? null) : null;
+    }
+  }
+
+  let data: { todos?: unknown; nextId?: unknown } | undefined;
+  for (const entry of entries) {
+    if (visibleIds && !visibleIds.has(entry.id)) continue;
+    if (entry.type === "custom" && entry.customType === TODO_ENTRY_TYPE) {
+      const record = entry.data as { todos?: unknown; nextId?: unknown } | undefined;
+      if (record) data = record;
+    }
+  }
+  const todos = Array.isArray(data?.todos) ? data.todos.filter(isTodoItem) : [];
+  const nextId = typeof data?.nextId === "number" ? data.nextId : 1;
+  return { todos, nextId };
+}
+
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
