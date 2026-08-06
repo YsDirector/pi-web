@@ -950,10 +950,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
 
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (e.key === "Enter" && e.shiftKey) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
-          // Default Enter sends as steer if available, else followup
+          // Shift+Enter sends as steer if available, else as followup
           sendQueued(onSteer ? "steer" : "followup");
         } else {
           handleSend();
