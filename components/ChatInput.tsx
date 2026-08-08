@@ -377,6 +377,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
+  const [phoneMode, setPhoneMode] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
@@ -721,6 +722,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     return () => {
       attachedImagesRef.current.forEach(revokeImagePreview);
     };
+  }, []);
+
+  // Phone mode: toggles Enter/Shift+Enter send semantics for on-screen
+  // keyboards (mobile remote access). Persisted in localStorage.
+  // Off (default, desktop): Enter sends, Shift+Enter inserts a newline.
+  // On (mobile): Enter inserts a newline, Shift+Enter sends.
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("pi-web:phoneMode") === "1") setPhoneMode(true);
+    } catch {
+      /* localStorage unavailable — keep desktop default */
+    }
+  }, []);
+  const togglePhoneMode = useCallback(() => {
+    setPhoneMode((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("pi-web:phoneMode", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
   }, []);
 
   const handleSend = useCallback(async () => {
@@ -1126,17 +1150,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
 
-      if (e.key === "Enter" && e.shiftKey) {
+      // Which Enter combination sends depends on phone mode:
+      //   desktop (phoneMode off): Enter sends, Shift+Enter = newline
+      //   mobile  (phoneMode on) : Shift+Enter sends, Enter = newline
+      const enterSends = phoneMode ? e.shiftKey : !e.shiftKey;
+      if (e.key === "Enter" && enterSends) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
-          // Shift+Enter sends as steer if available, else as followup
+          // Enter (per phone mode) sends as steer if available, else as followup
           sendQueued(onSteer ? "steer" : "followup");
         } else {
           handleSend();
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, phoneMode]
   );
 
   const handleInput = useCallback(() => {
@@ -2461,6 +2489,42 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                  {t("chat.stop")}
               </button>
             )}
+
+            <div>
+              <button
+                onClick={togglePhoneMode}
+                title={phoneMode ? t("chat.phoneModeOn") : t("chat.phoneModeOff")}
+                aria-label={t("chat.phoneMode")}
+                aria-pressed={phoneMode}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                  padding: isMobile ? "0 6px" : "8px 12px",
+                  width: isMobile ? "auto" : undefined,
+                  height: 32,
+                  background: phoneMode ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "none",
+                  border: "none",
+                  borderRadius: 9,
+                  color: phoneMode ? "var(--accent)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = phoneMode ? "color-mix(in srgb, var(--accent) 20%, transparent)" : "var(--bg-hover)";
+                  e.currentTarget.style.color = phoneMode ? "var(--accent)" : "var(--text)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = phoneMode ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "none";
+                  e.currentTarget.style.color = phoneMode ? "var(--accent)" : "var(--text-muted)";
+                }}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="7" y="2" width="10" height="20" rx="2" />
+                  <line x1="11" y1="18" x2="13" y2="18" />
+                </svg>
+                {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{t("chat.phoneMode")}</span>}
+              </button>
+            </div>
 
             {onSoundToggle !== undefined && (
               <button
