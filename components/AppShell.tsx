@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
@@ -18,10 +18,13 @@ import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
+import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
+import { showCompletionNotification } from "@/lib/browser-notifications";
 import { getInitialNavigation } from "@/lib/initial-navigation";
+import { clearLastOpen, getLastOpenSession, setLastOpenSession } from "@/lib/workspace-memory";
 import {
   getDefaultRightPanelWidth,
   getRightPanelMaxWidth,
@@ -53,13 +56,31 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
-  const { isDark, toggleTheme } = useTheme();
+  const { preference, toggleTheme } = useTheme();
+  const themeLabelKey =
+    preference === "light" ? "theme.light" : preference === "dark" ? "theme.dark" : "theme.auto";
   const { locale, setLocale, t: translate, supportedLocales } = useI18n();
   const isMobile = useIsMobile();
   useViewportHeight();
+  // Audio ownership lives here (not in ChatWindow) so the completion tone can
+  // also fire for tasks finishing in a non-active workspace whose ChatWindow
+  // is not mounted. ChatWindow receives the audio callbacks as props.
+  const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, soundEnabledRef } = useAudio();
+  const handleBackgroundTaskDone = useCallback(() => {
+    if (soundEnabledRef.current) playDoneSound();
+  }, [playDoneSound, soundEnabledRef]);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
-  // When user clicks +, we only store the cwd — no fake session id
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const handleRunningSessionIdsChange = useCallback((ids: Set<string>) => {
+    setRunningSessionIds((previous) => {
+      if (previous.size === ids.size && [...ids].every((id) => previous.has(id))) return previous;
+      return ids;
+    });
+  }, []);
+  // The temporary id distinguishes consecutive fresh composers in one cwd.
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
+  const [newSessionDraftId, setNewSessionDraftId] = useState("initial");
+  const activeNewSessionDraftKeyRef = useRef<string | null>(null);
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
     () => initialNavigation.requestedCwd ? "validating" : "idle",
   );
@@ -256,16 +277,19 @@ export function AppShell() {
   // read tool resolves it the same way (it strips the @ prefix).
   const handleAtMention = useCallback((relativePath: string, isDir: boolean) => {
     chatInputRef.current?.insertText(buildAtMentionText(relativePath, isDir));
-  }, []);
+    if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
+  }, [isMobile]);
 
   const handleAtMentions = useCallback((relativePaths: string[]) => {
     const mentions = buildFileAtMentionsText(relativePaths);
     if (mentions) chatInputRef.current?.insertText(mentions);
-  }, []);
+    if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
+  }, [isMobile]);
 
   const handleFileLineMention = useCallback((relativePath: string, startLine: number, endLine: number) => {
     chatInputRef.current?.insertText(buildFileLineMentionText(relativePath, startLine, endLine));
-  }, []);
+    if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
+  }, [isMobile]);
 
   const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
@@ -274,6 +298,24 @@ export function AppShell() {
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
+  // Guards the async workspace restore so a slow response from an earlier
+  // switch cannot resurrect a session into a project the user already left.
+  const workspaceRestoreTokenRef = useRef(0);
+
+  const invalidateWorkspaceRestore = useCallback(() => {
+    workspaceRestoreTokenRef.current += 1;
+  }, []);
+
+  // Persist every active-session transition, including new and forked sessions
+  // that bypass the sidebar selection handler. Transient sessions do not yet
+  // carry projectRoot, so use the active project identity until hydration.
+  useEffect(() => {
+    if (!selectedSession) return;
+    const projectKey = selectedSession.projectRoot
+      ?? activeProjectRootRef.current
+      ?? selectedSession.cwd;
+    setLastOpenSession(projectKey, selectedSession.id);
+  }, [selectedSession]);
 
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
@@ -298,6 +340,9 @@ export function AppShell() {
         // The sidebar will notify us when it adopts this cwd. Avoid remounting
         // the just-created empty chat during that initial synchronization.
         suppressCwdBumpRef.current = true;
+        const draftId = `initial:${requestedCwd}`;
+        setNewSessionDraftId(draftId);
+        activeNewSessionDraftKeyRef.current = `new:${draftId}:${data.cwd}`;
         setNewSessionCwd(data.cwd);
         setInitialCwdStatus("ready");
       })
@@ -310,7 +355,49 @@ export function AppShell() {
     return () => controller.abort();
   }, [initialNavigation]);
 
+  // Restore the workspace's last open session after switching to it. Called
+  // from handleCwdChange once the outgoing context has been reset. The session
+  // is looked up against the live list so a deleted or drifted session falls
+  // back to the default welcome page instead of erroring.
+  const restoreWorkspaceContext = useCallback((projectKey: string) => {
+    const token = ++workspaceRestoreTokenRef.current;
+    const lastOpenSessionId = getLastOpenSession(projectKey);
+    if (!lastOpenSessionId) return;
+    void fetch("/api/sessions")
+      .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
+      .then((d) => {
+        if (token !== workspaceRestoreTokenRef.current) return; // stale switch
+        const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
+        if (!s) {
+          // The list loaded but the remembered session is gone — forget it.
+          // When the list itself failed (d === null) keep the memory so a
+          // later switch retries the restore.
+          if (d) clearLastOpen(projectKey);
+          return;
+        }
+        if ((s.projectRoot ?? s.cwd) !== projectKey) {
+          // Defensive: the remembered session drifted out of this workspace.
+          clearLastOpen(projectKey);
+          return;
+        }
+        // Selecting the session must remount the chat with the session
+        // present: useAgentSession loads content in a mount-only effect, so
+        // the null-session welcome mount from the switch would never load
+        // the restored session's messages.
+        setSelectedSession(s);
+        setSessionKey((k) => k + 1);
+        if (new URLSearchParams(window.location.search).get("session") !== s.id) {
+          router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
+        }
+      })
+      .catch(() => {
+        // Network hiccup: keep the remembered session for a later retry.
+      });
+  }, [router]);
+
   const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
+    invalidateWorkspaceRestore();
+    const currentFreshCwd = newSessionCwd ?? activeCwd;
     setActiveCwd(cwd);
     // Skip if cwd is null (initial mount).
     if (!cwd) return;
@@ -325,14 +412,22 @@ export function AppShell() {
       suppressCwdBumpRef.current = false;
       return;
     }
-    // Worktrees of one repo share a project root. Moving the effective cwd
-    // within the same project (e.g. switching worktree, or clicking a session
-    // that lives in another worktree) must not close the open session.
-    if (currentProject === newProject) {
+    // Existing sessions stay open when the worktree selector moves within the
+    // same project. A fresh composer must remount when its effective cwd moves,
+    // otherwise its already-created runtime would keep sending to the old cwd.
+    if (
+      currentProject === newProject
+      && (selectedSession !== null || currentFreshCwd === cwd)
+    ) {
       return;
     }
     // Close any session that belongs to a different project — it no longer
     // matches the selected project directory.
+    const draftId = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    setNewSessionDraftId(draftId);
+    activeNewSessionDraftKeyRef.current = `new:${draftId}:${cwd}`;
     setSelectedSession(null);
     setNewSessionCwd((prev) => {
       if (prev && prev !== cwd) return null;
@@ -343,18 +438,35 @@ export function AppShell() {
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
     setActiveTopPanel(null);
-    // File tabs are keyed by absolute path, so tabs opened in the previous
-    // project would otherwise linger after switching to a different project.
-    // Reached only past the same-project early return above, so worktrees of
-    // one repo keep their open tabs. Mirror handleCloseFileTab and close the
-    // now-empty right panel.
-    setFileTabs([]);
-    setActiveFileTabId(null);
-    setRightPanelOpen(false);
+    if (currentProject !== newProject) {
+      // File tabs are keyed by absolute path, so tabs opened in the previous
+      // project must not linger. Same-project worktree switches keep them.
+      setFileTabs([]);
+      setActiveFileTabId(null);
+      setRightPanelOpen(false);
+      // Restore the workspace we switched to: its last open session, or keep
+      // the default welcome page when none is remembered.
+      restoreWorkspaceContext(newProject);
+    }
     router.replace("/", { scroll: false });
-  }, [router, selectedSession]);
+  }, [activeCwd, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    invalidateWorkspaceRestore();
+    activeNewSessionDraftKeyRef.current = null;
+    // Re-clicking the already-open session must not remount the chat and
+    // re-run the full load/positioning cycle. Only skip when the effective
+    // cwd context already matches — otherwise a pending cwd move still needs
+    // the full re-select flow.
+    if (!isRestore && selectedSession) {
+      const sameProject =
+        (selectedSession.projectRoot ?? selectedSession.cwd) ===
+        (session.projectRoot ?? session.cwd);
+      if (selectedSession.id === session.id && sameProject) {
+        if (isMobile) setSidebarOpen(false);
+        return;
+      }
+    }
     setNewSessionCwd(null);
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
@@ -372,9 +484,13 @@ export function AppShell() {
     if (!isRestore) {
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
-  }, [router, isMobile]);
+  }, [invalidateWorkspaceRestore, router, isMobile, selectedSession]);
 
-  const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
+  const handleNewSession = useCallback((sessionId: string, cwd: string) => {
+    invalidateWorkspaceRestore();
+    const draftKey = `new:${sessionId}:${cwd}`;
+    activeNewSessionDraftKeyRef.current = draftKey;
+    setNewSessionDraftId(sessionId);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
@@ -384,7 +500,7 @@ export function AppShell() {
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
     router.replace("/", { scroll: false });
-  }, [router, isMobile]);
+  }, [invalidateWorkspaceRestore, router, isMobile]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -408,18 +524,45 @@ export function AppShell() {
   }, []);
 
   // Called by ChatWindow when a new session gets its real id from pi
-  const handleSessionCreated = useCallback((session: SessionInfo) => {
+  const handleSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
+    setRefreshKey((k) => k + 1);
+    if (activeNewSessionDraftKeyRef.current !== sourceDraftKey) return;
+    invalidateWorkspaceRestore();
+    activeNewSessionDraftKeyRef.current = null;
     setNewSessionCwd(null);
     setSelectedSession(session);
-    setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [router, hydrateSelectedSession]);
+  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
-  }, []);
+
+    if (document.visibilityState === "visible") return;
+    if (!("Notification" in window)) return;
+
+    const targetSession = selectedSession;
+    const fire = () => {
+      const title = selectedSession?.name ?? translate("i18n.sessionComplete");
+      const sessionUrl = targetSession ? `/?session=${encodeURIComponent(targetSession.id)}` : "/";
+      void showCompletionNotification({
+        title,
+        body: translate("i18n.taskFinished"),
+        sessionUrl,
+        onClick: () => {
+          window.focus();
+          if (targetSession) handleSelectSession(targetSession);
+        },
+      });
+    };
+
+    if (Notification.permission === "granted") {
+      fire();
+    } else if (Notification.permission === "default") {
+      void Notification.requestPermission().then((p) => { if (p === "granted") fire(); });
+    }
+  }, [handleSelectSession, selectedSession, translate]);
 
   // Refresh the top-bar todo badge whenever the session, active branch, or an
   // agent run changes. The modal itself polls while open.
@@ -488,6 +631,8 @@ export function AppShell() {
   }, []);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
+    invalidateWorkspaceRestore();
+    activeNewSessionDraftKeyRef.current = null;
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
@@ -497,16 +642,22 @@ export function AppShell() {
     }));
     hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [router, hydrateSelectedSession]);
+  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
 
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
   }, []);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
+    invalidateWorkspaceRestore();
     setRefreshKey((k) => k + 1);
     if (selectedSession?.id === sessionId) {
       const cwd = selectedSession.cwd;
+      const draftId = typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      setNewSessionDraftId(draftId);
+      activeNewSessionDraftKeyRef.current = cwd ? `new:${draftId}:${cwd}` : null;
       setSelectedSession(null);
       setNewSessionCwd(cwd ?? null);
       setSessionKey((k) => k + 1);
@@ -516,7 +667,7 @@ export function AppShell() {
       setActiveTopPanel(null);
       router.replace("/", { scroll: false });
     }
-  }, [selectedSession, router]);
+  }, [invalidateWorkspaceRestore, selectedSession, router]);
 
   const handleOpenFile = useCallback((
     filePath: string,
@@ -582,6 +733,12 @@ export function AppShell() {
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
+  const newSessionDraftKey = selectedSession === null && effectiveNewSessionCwd
+    ? `new:${newSessionDraftId}:${effectiveNewSessionCwd}`
+    : null;
+  useLayoutEffect(() => {
+    activeNewSessionDraftKeyRef.current = newSessionDraftKey;
+  }, [newSessionDraftKey]);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   // While restoring initial session from URL, don't show the placeholder
@@ -665,6 +822,8 @@ export function AppShell() {
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
+        onBackgroundTaskDone={handleBackgroundTaskDone}
+        onRunningSessionIdsChange={handleRunningSessionIdsChange}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -889,9 +1048,8 @@ export function AppShell() {
               const rect = e.currentTarget.getBoundingClientRect();
               toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
             }}
-             title={isDark ? translate("theme.light") : translate("theme.dark")}
-             aria-label={isDark ? translate("theme.light") : translate("theme.dark")}
-            aria-pressed={isDark}
+            title={translate(themeLabelKey)}
+            aria-label={translate(themeLabelKey)}
             style={{
               display: "flex", alignItems: "center", justifyContent: "center",
               width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
@@ -901,17 +1059,23 @@ export function AppShell() {
             onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
           >
-            {isDark ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            {preference === "light" ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <circle cx="12" cy="12" r="5" />
                 <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
                 <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
                 <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
                 <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
               </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            ) : preference === "dark" ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="2" y="3" width="20" height="14" rx="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
               </svg>
             )}
            </button>
@@ -1055,9 +1219,10 @@ export function AppShell() {
                  {!isMobile && <span>{translate("history.label")}</span>}
               </button>
               {(() => {
+                // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
                 const hasMessages = Boolean(
                   selectedSession
-                  && (sessionStats?.userMessages ?? selectedSession.messageCount) > 0,
+                  && ((sessionStats?.userMessages ?? 0) > 0 || selectedSession.messageCount > 0),
                 );
                 const disabled = !selectedSession || !hasMessages || autoNameStatus.kind === "naming";
                 const isSuccess = autoNameStatus.kind === "success";
@@ -1430,10 +1595,22 @@ export function AppShell() {
                   padding: "12px 16px",
                 }}>
                   {sessionStats ? (() => {
+                    const formatDuration = (ms: number) => {
+                      if (ms <= 0) return "0s";
+                      const totalSec = Math.floor(ms / 1000);
+                      const h = Math.floor(totalSec / 3600);
+                      const m = Math.floor((totalSec % 3600) / 60);
+                      const s = totalSec % 60;
+                      if (h > 0) return `${h}h ${m}m`;
+                      if (m > 0) return `${m}m ${s}s`;
+                      return `${s}s`;
+                    };
+                    const totalActiveMs = sessionStats.totalActiveMs ?? 0;
                     const sessionRows = [
                        ...(sessionStats.sessionName ? [{ label: translate("session.name"), value: sessionStats.sessionName, copyField: null }] : []),
                        { label: translate("session.file"), value: sessionStats.sessionFile ?? translate("session.inMemory"), copyField: "file" as const },
                        { label: translate("session.id"), value: sessionStats.sessionId, copyField: "id" as const },
+                       ...(totalActiveMs > 0 ? [{ label: translate("session.totalActive"), value: formatDuration(totalActiveMs), copyField: null }] : []),
                     ];
                     const messageRows = [
                        [translate("session.user"), sessionStats.userMessages.toLocaleString(locale)],
@@ -1587,7 +1764,9 @@ export function AppShell() {
             <ChatWindow
               key={sessionKey}
               session={selectedSession}
+              sessionRunning={Boolean(selectedSession && runningSessionIds.has(selectedSession.id))}
               newSessionCwd={effectiveNewSessionCwd}
+              newSessionDraftKey={newSessionDraftKey}
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
@@ -1599,6 +1778,10 @@ export function AppShell() {
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
+              soundEnabled={soundEnabled}
+              onSoundToggle={onSoundToggle}
+              playDoneSound={playDoneSound}
+              unlockAudio={unlockAudio}
             />
           ) : initialCwdStatus === "validating" ? (
             <div
@@ -1703,6 +1886,7 @@ export function AppShell() {
               gitRefreshKey={explorerRefreshKey}
               initialDisplayMode={activeFileTab.initialDisplayMode}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
+              onAtMention={handleAtMention}
               onOpenFile={(filePath) => handleOpenFile(
                 filePath,
                 getFileName(filePath),
