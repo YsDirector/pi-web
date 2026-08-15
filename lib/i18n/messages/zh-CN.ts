@@ -198,6 +198,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.cancel": "取消",
     "chat.confirm": "确认",
     "chat.submit": "提交",
+    "chat.dialogTimeout": "⏳ 未确认，{s} 秒后自动关闭",
     "chat.extensionInput": "扩展终端输入",
     "chat.extensionPanel": "扩展面板",
     "chat.close": "关闭",

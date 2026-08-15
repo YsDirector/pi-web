@@ -198,6 +198,7 @@ export const enLocale: LocalePlugin = {
     "chat.cancel": "Cancel",
     "chat.confirm": "Confirm",
     "chat.submit": "Submit",
+    "chat.dialogTimeout": "⏳ Auto-dismiss in {s}s if not confirmed",
     "chat.extensionInput": "Extension terminal input",
     "chat.extensionPanel": "Extension panel",
     "chat.close": "Close",

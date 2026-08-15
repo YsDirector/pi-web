@@ -2,6 +2,10 @@
 
 export const MAX_EXTENSION_WIDGET_LINES = 10;
 
+// 在 pi-web 中隐藏的扩展 widget key。pi-deck-todo 的悬浮窗与 top bar 的
+// todo 模态窗重复，按用户要求只在 web 端隐藏（桌面端仍通过 setWidget 显示）。
+const HIDDEN_WIDGET_KEYS = new Set(["pi-deck-todo"]);
+
 function getDisplayLines(lines: string[]): string[] {
   if (lines.length <= MAX_EXTENSION_WIDGET_LINES) return lines;
   return [
@@ -11,10 +15,11 @@ function getDisplayLines(lines: string[]): string[] {
 }
 
 export function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
-  if (widgets.length === 0) return null;
+  const visibleWidgets = widgets.filter((widget) => !HIDDEN_WIDGET_KEYS.has(widget.key));
+  if (visibleWidgets.length === 0) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
-      {widgets.map((widget) => (
+      {visibleWidgets.map((widget) => (
         <div
           key={widget.key}
           style={{

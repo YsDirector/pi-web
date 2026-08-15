@@ -1058,6 +1058,46 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
 
 type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
 
+/**
+ * 渲染弹窗标题：识别 ```sh / ```bash 代码围栏，把围栏内容渲染为高亮代码块
+ * （红色边框 + 红色底纹，提示风险命令），其余文本保持 pre-wrap 多行。
+ */
+function renderDialogTitle(title: string): ReactNode {
+  const segments = title.split(/```(?:sh|bash)?\s*\n?/);
+  if (segments.length === 1) return title;
+  return segments.map((seg, i) => {
+    if (i % 2 === 1) {
+      return (
+        <pre
+          key={i}
+          style={{
+            margin: "6px 0",
+            padding: "8px 10px",
+            borderRadius: 6,
+            background: "rgba(239,68,68,0.10)",
+            border: "1px solid rgba(239,68,68,0.35)",
+            borderLeft: "3px solid #ef4444",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12.5,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-all",
+            overflowX: "auto",
+            color: "var(--text)",
+          }}
+        >
+          {seg}
+        </pre>
+      );
+    }
+    return (
+      <span key={i} style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+        {seg}
+      </span>
+    );
+  });
+}
+
 function ExtensionDialog({
   request,
   onRespond,
@@ -1067,6 +1107,28 @@ function ExtensionDialog({
 }) {
   const { t } = useI18n();
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
+
+  // 超时倒计时：请求带 timeout/expiresAt 时显示剩余秒数，到点自动取消
+  const deadlineMs = request.expiresAt ?? (request.timeout ? Date.now() + request.timeout : null);
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    if (deadlineMs == null) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(timer);
+  }, [deadlineMs]);
+  const remainingMs = deadlineMs == null ? null : Math.max(0, deadlineMs - now);
+  const remainingSec = remainingMs == null ? null : Math.ceil(remainingMs / 1000);
+  useEffect(() => {
+    if (remainingMs != null && remainingMs <= 0) {
+      onRespond(request, { cancelled: true });
+    }
+  }, [remainingMs, request, onRespond]);
+
+  // 标题首行固定在头部；其余内容（含长命令/代码块）放进可滚动区域，按钮始终可见
+  const firstNewline = request.title.indexOf("\n");
+  const titleHead = firstNewline === -1 ? request.title : request.title.slice(0, firstNewline);
+  const titleRest = firstNewline === -1 ? "" : request.title.slice(firstNewline + 1);
 
   useEffect(() => {
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
@@ -1097,7 +1159,10 @@ function ExtensionDialog({
         role="dialog"
         aria-modal="true"
         style={{
-          width: "min(560px, 100%)",
+          width: "min(620px, 100%)",
+          maxHeight: "min(85vh, calc(100vh - 40px))",
+          display: "flex",
+          flexDirection: "column",
           border: "1px solid var(--border)",
           borderRadius: 8,
           background: "var(--bg)",
@@ -1105,12 +1170,17 @@ function ExtensionDialog({
           overflow: "hidden",
         }}
       >
-        <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650 }}>{request.title}</div>
+        <div style={{ flexShrink: 0, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{titleHead}</div>
           <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>{t("chat.extensionRequest")}</div>
         </div>
 
-        <div style={{ padding: 14 }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 14 }}>
+          {titleRest && (
+            <div style={{ marginBottom: 12, color: "var(--text-muted)", fontSize: 13, lineHeight: 1.55 }}>
+              {renderDialogTitle(titleRest)}
+            </div>
+          )}
           {request.method === "confirm" && (
             <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.message}</div>
           )}
@@ -1187,7 +1257,19 @@ function ExtensionDialog({
           )}
         </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+          {remainingMs != null && remainingMs > 0 && (
+            <span
+              style={{
+                flex: 1,
+                color: remainingMs < 10000 ? "var(--accent)" : "var(--text-dim)",
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              {t("chat.dialogTimeout", { s: remainingSec ?? 0 })}
+            </span>
+          )}
           <button
             onClick={() => onRespond(request, { cancelled: true })}
             style={{
@@ -1357,6 +1439,7 @@ function BatchAskDialog({
             gap: 10,
             padding: "12px 14px",
             borderBottom: "1px solid var(--border)",
+            flexShrink: 0,
           }}
         >
           <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650 }}>{t("chat.batchAskTitle")}</div>
@@ -1373,6 +1456,7 @@ function BatchAskDialog({
             padding: "10px 14px 0",
             borderBottom: "1px solid var(--border)",
             overflowX: "auto",
+            flexShrink: 0,
           }}
         >
           {questions.map((qq, i) => (
@@ -1610,6 +1694,7 @@ function BatchAskDialog({
             padding: "10px 14px",
             borderTop: "1px solid var(--border)",
             background: "var(--bg-panel)",
+            flexShrink: 0,
           }}
         >
           <button
