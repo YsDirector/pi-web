@@ -5,7 +5,7 @@ import { resolveSessionPath, getSessionTodos } from "@/lib/session-reader";
  * GET /api/sessions/[id]/todos?leafId=<optional>
  *
  * Returns the branch-scoped todo list for a session. The todo state is stored
- * by the pi-deck-todo extension as a custom `pi-deck-todo` session entry, so we
+ * by the todo extension as a custom `todo-entry` session entry, so we
  * read the last snapshot on the active branch from the session file.
  *
  * Response: { todos: [{ id, text, done }], nextId }

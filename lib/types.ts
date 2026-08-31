@@ -203,7 +203,7 @@ export type ExtensionUiResponse =
   | { type: "extension_ui_response"; id: string; cancelled: true };
 
 /**
- * __piDeckBatchAsk__ envelope — multi-question questionnaire (tabbed batch UI).
+ * __piBatchAsk__ envelope — multi-question questionnaire (tabbed batch UI).
  * The ask_question extension sends this as the `title` of an `input`
  * extension_ui_request; a client that recognizes it renders a tabbed batch
  * questionnaire and replies with a JSON string { answers: BatchAskAnswer[] }.
@@ -225,7 +225,7 @@ export interface BatchAskQuestion {
 }
 
 export interface BatchAskEnvelope {
-  __piDeckBatchAsk__: number;
+  __piBatchAsk__: number;
   review: boolean;
   questions: BatchAskQuestion[];
 }

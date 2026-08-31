@@ -14,7 +14,7 @@ interface TodoModalProps {
 const POLL_MS = 3000;
 
 /**
- * Modal showing the current session's todo list (pi-deck-todo extension).
+ * Modal showing the current session's todo list (todo extension).
  * Fetches from /api/sessions/[id]/todos and polls while open so progress stays
  * in sync while the agent is running.
  */

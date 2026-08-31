@@ -7,9 +7,9 @@ import type { ExtensionWidgetItem } from "@/lib/types";
 export const DEFAULT_EXPANDED_WIDGET_LINES = 3;
 export const WIDGET_UPDATE_IDLE_MS = 1100;
 
-// 在 pi-web 中隐藏的扩展 widget key。pi-deck-todo 的悬浮窗与 top bar 的
+// 在 pi-web 中隐藏的扩展 widget key。todo 的悬浮窗与 top bar 的
 // todo 模态窗重复，按用户要求只在 web 端隐藏（桌面端仍通过 setWidget 显示）。
-const HIDDEN_WIDGET_KEYS = new Set(["pi-deck-todo"]);
+const HIDDEN_WIDGET_KEYS = new Set(["todo-widget"]);
 
 export function formatExtensionWidgetContent(lines: string[]): string {
   return lines.join("\n");

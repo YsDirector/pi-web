@@ -227,8 +227,8 @@ export function getSessionEntries(filePath: string): SessionEntry[] {
 }
 
 // ============================================================================
-// Todo list — read from the branch-scoped `pi-deck-todo` custom entry written
-// by the pi-deck-todo extension (pi.appendEntry). Each entry stores the full
+// Todo list — read from the branch-scoped `todo-entry` custom entry written
+// by the todo extension (pi.appendEntry). Each entry stores the full
 // snapshot { todos, nextId }, so the last one on the active branch is the
 // authoritative state. Falls back to an empty list when absent.
 // ============================================================================
@@ -244,7 +244,7 @@ export interface SessionTodos {
   nextId: number;
 }
 
-const TODO_ENTRY_TYPE = "pi-deck-todo";
+const TODO_ENTRY_TYPE = "todo-entry";
 
 function isTodoItem(value: unknown): value is SessionTodoItem {
   if (typeof value !== "object" || value === null) return false;
@@ -258,7 +258,7 @@ function isTodoItem(value: unknown): value is SessionTodoItem {
 
 /**
  * Read the todo list for a branch of a session file.
- * The state lives in a custom `pi-deck-todo` entry; we take the last snapshot.
+ * The state lives in a custom `todo-entry` entry; we take the last snapshot.
  * When `leafId` is provided, only entries on that leaf's ancestry are considered
  * so the modal reflects the branch currently viewed in the chat.
  */

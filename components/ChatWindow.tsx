@@ -1283,11 +1283,11 @@ function ExtensionDialog({
 
 
 /**
- * __piDeckBatchAsk__ envelope — multi-question questionnaire (tabbed batch UI).
+ * __piBatchAsk__ envelope — multi-question questionnaire (tabbed batch UI).
  * The ask_question extension sends it as the `title` of an `input` request;
  * we detect it and render a tabbed batch questionnaire instead of a plain input.
  */
-const BATCH_ASK_ENVELOPE_KEY = "__piDeckBatchAsk";
+const BATCH_ASK_ENVELOPE_KEY = "__piBatchAsk";
 
 function parseBatchAskEnvelope(request: ExtensionDialogRequest): BatchAskEnvelope | null {
   if (request.method !== "input") return null;
@@ -1302,7 +1302,7 @@ function parseBatchAskEnvelope(request: ExtensionDialogRequest): BatchAskEnvelop
   if (p[BATCH_ASK_ENVELOPE_KEY] !== 1) return null;
   const questions = Array.isArray(p.questions) ? (p.questions as BatchAskQuestion[]) : [];
   if (questions.length === 0) return null;
-  return { __piDeckBatchAsk__: 1, review: p.review === true, questions };
+  return { __piBatchAsk__: 1, review: p.review === true, questions };
 }
 
 function isAnswered(a: BatchAskAnswer | null): boolean {
@@ -1310,7 +1310,7 @@ function isAnswered(a: BatchAskAnswer | null): boolean {
 }
 
 /**
- * Batch questionnaire dialog for the __piDeckBatchAsk__ envelope protocol.
+ * Batch questionnaire dialog for the __piBatchAsk__ envelope protocol.
  * Renders one tab per question (select/confirm/input/editor), an optional
  * Review tab, and replies with { value: JSON.stringify({ answers }) }.
  */
