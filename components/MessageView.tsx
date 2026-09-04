@@ -7,6 +7,7 @@ import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { getAssistantErrorMessage, isEmptyThinkingBlock } from "@/lib/message-display";
+import { opencodeQuotaPct } from "@/lib/opencode-quota";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { isEditToolName } from "@/lib/tool-names";
 import { TurnWrittenFiles } from "./TurnWrittenFiles";
@@ -806,7 +807,7 @@ function AssistantMessageView({
       }}>
         {message.usage && !isStreaming && (
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {formatUsage(message.usage)}
+            {formatUsage(message.usage, message.model)}
           </div>
         )}
         {textContent && !isStreaming && (
@@ -1690,13 +1691,16 @@ function formatUsage(usage: {
   cacheRead: number;
   cacheWrite: number;
   cost: { total: number };
-}): string {
+}, model?: string): string {
   const parts = [];
   if (usage.input) parts.push(`${usage.input.toLocaleString()} in`);
   if (usage.output) parts.push(`${usage.output.toLocaleString()} out`);
   if (usage.cacheRead) parts.push(`${usage.cacheRead.toLocaleString()} cache R`);
   if (usage.cacheWrite) parts.push(`${usage.cacheWrite.toLocaleString()} cache W`);
   if (usage.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
+  // OpenCode Go 月额度消耗百分比（含模型倍率）：pct = cost × rate / $60
+  const pct = opencodeQuotaPct(model, usage.cost?.total);
+  if (pct !== null) parts.push(`${pct.toFixed(3)}%`);
   return parts.join(" · ");
 }
 
