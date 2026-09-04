@@ -355,6 +355,7 @@ export const zhTWLocale: LocalePlugin = {
     "chat.commandSession": "顯示工作階段的訊息、Token 和費用統計",
     "chat.commandCopy": "複製最後一則助理訊息",
     "chat.commandClone": "將目前分支複製為獨立新工作階段",
+    "chat.commandUsage": "開啟 AI 渠道用量儀表板（額度、費用、每日圖表）",
     "chat.compacted": "已壓縮",
     "chat.tokensSaved": "已節省 {saved}",
     "i18n.close": "關閉",

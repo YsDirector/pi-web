@@ -377,6 +377,7 @@ export const enLocale: LocalePlugin = {
     "chat.commandSession": "Show session message, token, and cost stats",
     "chat.commandCopy": "Copy the last assistant message",
     "chat.commandClone": "Clone the current branch into a new session",
+    "chat.commandUsage": "Open AI channel usage dashboard (quota, cost, per-day chart)",
     "chat.compacted": "Compacted",
     "chat.tokensSaved": "{saved} saved",
     "i18n.close": "Close",

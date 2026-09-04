@@ -148,6 +148,7 @@ const BUILTIN_SLASH_COMMANDS: BuiltinSlashCommand[] = [
   { name: "session", description: "chat.commandSession", source: "builtin", availableWhileStreaming: true },
   { name: "copy", description: "chat.commandCopy", source: "builtin", availableWhileStreaming: true },
   { name: "clone", description: "chat.commandClone", source: "builtin" },
+  { name: "usage", description: "chat.commandUsage", source: "builtin" },
 ];
 
 function getBuiltinSlashCommand(message: string): BuiltinSlashCommand | undefined {
@@ -815,7 +816,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const builtinCommands = isStreaming
       ? BUILTIN_SLASH_COMMANDS.filter((command) => command.availableWhileStreaming)
       : BUILTIN_SLASH_COMMANDS;
-    const commands = [...builtinCommands, ...(slashCommands ?? [])];
+    // 前端内置命令优先：同名扩展命令（如 /usage）去掉，避免补全列表重复
+    const builtinNames = new Set(builtinCommands.map((c) => c.name));
+    const commands = [
+      ...builtinCommands,
+      ...(slashCommands ?? []).filter((c) => !builtinNames.has(c.name)),
+    ];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();

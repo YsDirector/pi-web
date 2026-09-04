@@ -1661,11 +1661,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
 
         case "usage": {
-          // 前端拦截：打开用量看板独立页面（不把命令发给 agent）
-          if (typeof window !== "undefined") {
-            window.open("/usage", "_blank", "noopener,noreferrer");
+          // 无参：打开用量看板独立页面（不把命令发给 agent）
+          // 带参（如 /usage add <会话ID>）：交给 agent 执行（usage-tracker 扩展处理）
+          if (!args) {
+            if (typeof window !== "undefined") {
+              window.open("/usage", "_blank", "noopener,noreferrer");
+            }
+            return complete({ handled: true, action: "openUsageDashboard" });
           }
-          return complete({ handled: true, action: "openUsageDashboard" });
+          return { handled: false };
         }
 
         default:
