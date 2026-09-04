@@ -136,7 +136,7 @@ export interface SlashCommandInfo {
 
 export type BuiltinSlashCommandResult =
   | { handled: false }
-  | { handled: true; message?: string; error?: string; action?: "openSessionStats" };
+  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openUsageDashboard" };
 
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
@@ -1582,7 +1582,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!result.handled) return result;
       if (result.error) {
         addNotice({ type: "error", message: result.error });
-      } else if (result.action !== "openSessionStats") {
+      } else if (result.action !== "openSessionStats" && result.action !== "openUsageDashboard") {
         addNotice({ type: "success", message: result.message ?? "Command completed" });
       }
       return result;
@@ -1658,6 +1658,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const completed = complete({ handled: true, message: "Cloned current session branch" });
           onSessionForked?.(result.newSessionId);
           return completed;
+        }
+
+        case "usage": {
+          // 前端拦截：打开用量看板独立页面（不把命令发给 agent）
+          if (typeof window !== "undefined") {
+            window.open("/usage", "_blank", "noopener,noreferrer");
+          }
+          return complete({ handled: true, action: "openUsageDashboard" });
         }
 
         default:
