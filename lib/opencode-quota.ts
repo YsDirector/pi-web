@@ -13,12 +13,30 @@
 export interface OpencodeModelMeta {
   /** 该模型月可用额度（美元） */
   usage: number;
-  /** 倍率 = 60 / usage */
+  /** 倍率 = 60 / usage（Off-Peak 基础倍率） */
   rate: number;
+  /** 高峰时段倍率（deepseek-v4 系列价格翻倍） */
+  peakRate?: number;
 }
 
 /** 月额度池（美元） */
 export const OPENCODE_MONTHLY_QUOTA_USD = 60;
+
+/**
+ * 高峰时段判断（北京时间）：周一至周五 9:00-12:00 与 14:00-18:00。
+ * 高峰时 deepseek-v4 系列价格翻倍（等效倍率翻倍，flash: 2→4, pro: 4→8）。
+ */
+export function isOpencodePeakHours(ts: number = Date.now()): boolean {
+  // 北京时间 = UTC+8
+  const d = new Date(ts + 8 * 3600 * 1000);
+  const day = d.getUTCDay(); // 0=日 6=六
+  if (day === 0 || day === 6) return false; // 周末全天空闲
+  const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+  return (
+    (minutes >= 9 * 60 && minutes < 12 * 60) ||
+    (minutes >= 14 * 60 && minutes < 18 * 60)
+  );
+}
 
 export const OPENCODE_GO_MODEL_META: Record<string, OpencodeModelMeta> = {
   "grok-4.6": { usage: 15, rate: 4 },
@@ -43,9 +61,9 @@ export const OPENCODE_GO_MODEL_META: Record<string, OpencodeModelMeta> = {
   "qwen3.7-max": { usage: 30, rate: 2 },
   "qwen3.7-plus": { usage: 60, rate: 1 },
   "qwen3.6-plus": { usage: 60, rate: 1 },
-  "deepseek-v4-pro": { usage: 15, rate: 4 },
-  "deepseek-v4-flash": { usage: 30, rate: 2 },
-  "deepseek-v4-flash-vision-exp": { usage: 15, rate: 4 },
+  "deepseek-v4-pro": { usage: 15, rate: 4, peakRate: 8 },
+  "deepseek-v4-flash": { usage: 30, rate: 2, peakRate: 4 },
+  "deepseek-v4-flash-vision-exp": { usage: 15, rate: 4, peakRate: 8 },
   "hy4-preview": { usage: 30, rate: 2 },
   "hy3": { usage: 60, rate: 1 },
   // 免费/无额度模型
@@ -59,9 +77,12 @@ export const OPENCODE_GO_MODEL_META: Record<string, OpencodeModelMeta> = {
 export function opencodeQuotaPct(
   model: string | undefined,
   costUsd: number | undefined,
+  ts: number = Date.now(),
 ): number | null {
   if (!model || !costUsd || costUsd <= 0) return null;
   const meta = OPENCODE_GO_MODEL_META[model];
   if (!meta || meta.rate <= 0) return null;
-  return (costUsd * meta.rate) / OPENCODE_MONTHLY_QUOTA_USD * 100;
+  // 高峰时段（北京时间工作日上午/下午）deepseek-v4 系列倍率翻倍
+  const rate = meta.peakRate && isOpencodePeakHours(ts) ? meta.peakRate : meta.rate;
+  return (costUsd * rate) / OPENCODE_MONTHLY_QUOTA_USD * 100;
 }
