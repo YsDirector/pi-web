@@ -14,6 +14,7 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
 import { useI18n } from "@/hooks/useI18n";
+import { splitDialogTitle, splitDialogTitleCode } from "@/lib/dialog-title";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -1472,10 +1473,10 @@ function getExtensionDialogSummary(request: ExtensionDialogRequest): string | un
  * （红色边框 + 红色底纹，提示风险命令），其余文本保持 pre-wrap 多行。
  */
 function renderDialogTitle(title: string): ReactNode {
-  const segments = title.split(/```(?:sh|bash)?\s*\n?/);
-  if (segments.length === 1) return title;
+  const segments = splitDialogTitleCode(title);
+  if (segments.length === 1 && !segments[0].isCode) return title;
   return segments.map((seg, i) => {
-    if (i % 2 === 1) {
+    if (seg.isCode) {
       return (
         <pre
           key={i}
@@ -1495,13 +1496,13 @@ function renderDialogTitle(title: string): ReactNode {
             color: "var(--text)",
           }}
         >
-          {seg}
+          {seg.text}
         </pre>
       );
     }
     return (
       <span key={i} style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-        {seg}
+        {seg.text}
       </span>
     );
   });
@@ -1545,9 +1546,7 @@ function ExtensionDialog({
   }, [request]);
 
   // 标题首行固定在头部；其余内容（含长命令/代码块）放进可滚动区域，按钮始终可见（fork 特性）
-  const firstNewline = request.title.indexOf("\n");
-  const titleHead = firstNewline === -1 ? request.title : request.title.slice(0, firstNewline);
-  const titleRest = firstNewline === -1 ? "" : request.title.slice(firstNewline + 1);
+  const { head: titleHead, rest: titleRest } = splitDialogTitle(request.title);
 
   const countdown = remainingSeconds !== null && (
     <span style={{ fontSize: 11, fontWeight: urgent ? 600 : undefined, color: urgent ? "var(--accent)" : "var(--text-dim)", whiteSpace: "nowrap", flexShrink: 0 }}>
