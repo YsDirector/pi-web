@@ -2,7 +2,7 @@
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
@@ -14,7 +14,8 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
 import { useI18n } from "@/hooks/useI18n";
-import { splitDialogTitle, splitDialogTitleCode } from "@/lib/dialog-title";
+import { splitDialogTitle } from "@/lib/dialog-title";
+import { renderDialogTitle } from "@/lib/dialog-title-view";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -1459,45 +1460,6 @@ function getExtensionDialogSummary(request: ExtensionDialogRequest): string | un
   return undefined;
 }
 
-/**
- * 渲染弹窗标题：识别 ```sh / ```bash 代码围栏，把围栏内容渲染为高亮代码块
- * （红色边框 + 红色底纹，提示风险命令），其余文本保持 pre-wrap 多行。
- */
-function renderDialogTitle(title: string): ReactNode {
-  const segments = splitDialogTitleCode(title);
-  if (segments.length === 1 && !segments[0].isCode) return title;
-  return segments.map((seg, i) => {
-    if (seg.isCode) {
-      return (
-        <pre
-          key={i}
-          style={{
-            margin: "6px 0",
-            padding: "8px 10px",
-            borderRadius: 6,
-            background: "rgba(239,68,68,0.10)",
-            border: "1px solid rgba(239,68,68,0.35)",
-            borderLeft: "3px solid #ef4444",
-            fontFamily: "var(--font-mono)",
-            fontSize: 12.5,
-            lineHeight: 1.5,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-all",
-            overflowX: "auto",
-            color: "var(--text)",
-          }}
-        >
-          {seg.text}
-        </pre>
-      );
-    }
-    return (
-      <span key={i} style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-        {seg.text}
-      </span>
-    );
-  });
-}
 
 function ExtensionDialog({
   request,
@@ -1530,11 +1492,6 @@ function ExtensionDialog({
       onRespond(request, { cancelled: true });
     }
   }, [remainingMs, request, onRespond]);
-
-  // 请求切换时重置编辑器草稿（fork 特性）
-  useEffect(() => {
-    setValue(request.method === "editor" ? request.prefill ?? "" : "");
-  }, [request]);
 
   // 标题首行固定在头部；其余内容（含长命令/代码块）放进可滚动区域，按钮始终可见（fork 特性）
   const { head: titleHead, rest: titleRest } = splitDialogTitle(request.title);
