@@ -127,6 +127,8 @@ if [ "${2:-}" = "--deploy" ]; then
   rsync -a --delete public/ "$DEPLOY_DIR/public/"
   mv "$DEPLOY_DIR/node_modules" "$DEPLOY_DIR/node_modules.old-$TS"
   rsync -a --delete node_modules/ "$DEPLOY_DIR/node_modules/"
+  # 内嵌宿主 secret 透传补丁（npm 原版覆盖 node_modules 后必须重打，否则密码框静默变明文）
+  PI_WEB_ROOT="$DEPLOY_DIR" ~/.pi/agent/patches/pi-web-secret-input/apply.sh 2>&1 | tail -2 || echo "⚠ secret 补丁失败，检查 ~/.pi/agent/patches/pi-web-secret-input/"
   # 备份只留最近 1 份
   ls -dt "$DEPLOY_DIR"/.next.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
   ls -dt "$DEPLOY_DIR"/node_modules.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
