@@ -10,7 +10,6 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
-import { TodoModal } from "./TodoModal";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { SystemPromptPanel } from "./SystemPromptPanel";
@@ -54,7 +53,6 @@ import {
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
-import type { SessionTodos } from "@/lib/session-reader";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -250,9 +248,6 @@ export function AppShell() {
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
   const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
-  // Todo list modal + top-bar badge (current branch's todo snapshot)
-  const [todoModalOpen, setTodoModalOpen] = useState(false);
-  const [todoSnapshot, setTodoSnapshot] = useState<SessionTodos | null>(null);
   const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
   const sessionHasBranches = hasSessionBranches(branchTree);
 
@@ -265,32 +260,6 @@ export function AppShell() {
   const handleBranchLeafChange = useCallback((leafId: string | null) => {
     branchLeafChangeFnRef.current?.(leafId);
   }, []);
-
-  // Refresh the top-bar todo badge whenever the session, active branch, or an
-  // agent run changes. The modal itself polls while open.
-  const loadTodoSnapshot = useCallback(async () => {
-    const sessionId = selectedSession?.id;
-    if (!sessionId) {
-      setTodoSnapshot(null);
-      return;
-    }
-    const leafId = branchActiveLeafId;
-    const query = leafId ? `?leafId=${encodeURIComponent(leafId)}` : "";
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/todos${query}`, {
-        cache: "no-store",
-      });
-      if (!response.ok) return;
-      const data = (await response.json()) as SessionTodos;
-      if (Array.isArray(data.todos)) setTodoSnapshot(data);
-    } catch {
-      // Keep the last known snapshot on transient failures.
-    }
-  }, [selectedSession?.id, branchActiveLeafId]);
-
-  useEffect(() => {
-    void loadTodoSnapshot();
-  }, [loadTodoSnapshot, refreshKey]);
 
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [systemTools, setSystemTools] = useState<ToolEntry[] | null>(null);
@@ -1434,93 +1403,6 @@ export function AppShell() {
             <path d="M12 7v5l3 2" />
           </svg>
           {!mobile && <span>{translate("history.label")}</span>}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setTodoModalOpen(true);
-            if (mobile) setMobileToolbarMoreOpen(true);
-          }}
-          disabled={!selectedSession}
-          title={selectedSession ? translate("todo.show") : translate("todo.unsaved")}
-          aria-label={translate("todo.label")}
-          aria-haspopup="dialog"
-          aria-expanded={todoModalOpen}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
-            height: "100%",
-            padding: mobile ? 0 : "0 12px",
-            background: "none",
-            border: "none",
-            borderTop: "2px solid transparent",
-            borderRight: "1px solid var(--border)",
-            color: selectedSession ? "var(--text-muted)" : "var(--text-dim)",
-            cursor: selectedSession ? "pointer" : "not-allowed",
-            opacity: selectedSession ? 1 : 0.45,
-            flexShrink: 0,
-            fontSize: 11,
-            whiteSpace: "nowrap",
-            transition: "color 0.1s, background 0.1s, opacity 0.1s",
-          }}
-          onMouseEnter={(event) => {
-            if (!selectedSession) return;
-            event.currentTarget.style.color = "var(--text)";
-            event.currentTarget.style.background = "var(--bg-hover)";
-          }}
-          onMouseLeave={(event) => {
-            event.currentTarget.style.color = selectedSession ? "var(--text-muted)" : "var(--text-dim)";
-            event.currentTarget.style.background = "none";
-          }}
-          data-mobile-toolbar-action={mobile ? "todo" : undefined}
-        >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ color: selectedSession ? "var(--text-muted)" : "var(--text-dim)", flexShrink: 0 }}
-            aria-hidden="true"
-          >
-            <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
-            <rect x="9" y="3" width="6" height="4" rx="1" />
-            <path d="m9 14 2 2 4-4" />
-          </svg>
-          {!mobile && <span>{translate("todo.label")}</span>}
-          {selectedSession && (
-            (() => {
-              const pendingCount = todoSnapshot?.todos.filter((todo) => !todo.done).length ?? 0;
-              if (pendingCount === 0) return null;
-              return (
-                <span
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    minWidth: 16,
-                    height: 16,
-                    padding: "0 4px",
-                    borderRadius: 8,
-                    background: "var(--accent)",
-                    color: "#fff",
-                    fontSize: 10,
-                    fontWeight: 700,
-                    lineHeight: 1,
-                    flexShrink: 0,
-                  }}
-                >
-                  {pendingCount}
-                </span>
-              );
-            })()
-          )}
         </button>
         {(() => {
           // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
@@ -2722,13 +2604,6 @@ export function AppShell() {
           if (!projectTrustBusy) setProjectTrustDialogOpen(false);
         }}
         onConfirm={() => void handleTrustProject()}
-      />
-    )}
-    {todoModalOpen && selectedSession && (
-      <TodoModal
-        sessionId={selectedSession.id}
-        leafId={branchActiveLeafId}
-        onClose={() => setTodoModalOpen(false)}
       />
     )}
     </>

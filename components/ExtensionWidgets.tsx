@@ -8,10 +8,6 @@ import type { ExtensionWidgetItem } from "@/lib/types";
 export const DEFAULT_EXPANDED_WIDGET_LINES = 3;
 export const WIDGET_UPDATE_IDLE_MS = 1100;
 
-// 在 pi-web 中隐藏的扩展 widget key。todo 的悬浮窗与 top bar 的
-// todo 模态窗重复，按用户要求只在 web 端隐藏（桌面端仍通过 setWidget 显示）。
-const HIDDEN_WIDGET_KEYS = new Set(["todo-widget"]);
-
 export function formatExtensionWidgetContent(lines: string[]): string {
   return lines.join("\n");
 }
@@ -106,10 +102,9 @@ export function ExtensionWidgets({ widgets }: { widgets: ExtensionWidgetItem[] }
     updateClearTimersRef.current.clear();
   }, []);
 
-  const visibleWidgets = widgets.filter((widget) => !HIDDEN_WIDGET_KEYS.has(widget.key));
-  if (visibleWidgets.length === 0) return null;
+  if (widgets.length === 0) return null;
 
-  const expandedWidget = visibleWidgets.find((widget) => (
+  const expandedWidget = widgets.find((widget) => (
     widget.key === expandedWidgetKey
     && widget.lines.length > 0
   ));
@@ -124,7 +119,7 @@ export function ExtensionWidgets({ widgets }: { widgets: ExtensionWidgetItem[] }
         <div className="extension-widget-panels">
           {(() => {
             const widget = expandedWidget;
-            const index = visibleWidgets.indexOf(widget);
+            const index = widgets.indexOf(widget);
             const triggerId = `${idPrefix}-trigger-${index}`;
             const panelId = `${idPrefix}-panel-${index}`;
             return (
@@ -144,7 +139,7 @@ export function ExtensionWidgets({ widgets }: { widgets: ExtensionWidgetItem[] }
         </div>
       )}
       <div className="extension-widget-triggers" aria-label={t("chat.extensionWidgets")}>
-        {visibleWidgets.map((widget, index) => {
+        {widgets.map((widget, index) => {
           const expandable = widget.lines.length > 0;
           const expanded = expandable && widget.key === expandedWidget?.key;
           const updating = updatingWidgetKeys.has(widget.key);
