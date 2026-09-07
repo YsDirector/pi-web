@@ -19,6 +19,19 @@ export interface OpencodeModelMeta {
   peakRate?: number;
 }
 
+/** /api/usage/meta 返回的单渠道表结构 */
+export interface ProviderQuotaTable {
+  monthlyQuotaUsd?: number;
+  payAsYouGo?: boolean;
+  unit?: "usd" | "count";
+  models: Record<string, { usage: number; rate: number; peakRate?: number }>;
+}
+
+export interface QuotaMetaResponse {
+  ok: boolean;
+  tables: Record<string, ProviderQuotaTable>;
+}
+
 /** 月额度池（美元） */
 export const OPENCODE_MONTHLY_QUOTA_USD = 60;
 
@@ -85,4 +98,63 @@ export function opencodeQuotaPct(
   // 高峰时段（北京时间工作日上午/下午）deepseek-v4 系列倍率翻倍
   const rate = meta.peakRate && isOpencodePeakHours(ts) ? meta.peakRate : meta.rate;
   return (costUsd * rate) / OPENCODE_MONTHLY_QUOTA_USD * 100;
+}
+
+// ── 多渠道通用版：从 /api/usage/meta 读各 provider 模型表，静态 opencode-go 表兜底 ──
+
+const META_URL = "/api/usage/meta";
+
+/**
+ * 消息行月额度百分比的通用计算。
+ *
+ * 数据源优先级：
+ *   1. /api/usage/meta 按 provider 返回的模型表（与 /usage 看板/usage-tracker 同源）；
+ *      模型表缺失某模型或渠道按量计费（payAsYouGo）时返回 null。
+ *   2. 兜底：provider 为 opencode-go（或其表内短 id）时退回静态 OPENCODE_GO_MODEL_META。
+ *
+ * pct = costUsd × rate / 渠道月额度 × 100（高峰时段用 peakRate）。
+ */
+export async function usageQuotaPct(
+  provider: string | undefined,
+  model: string | undefined,
+  costUsd: number | undefined,
+  ts: number = Date.now(),
+): Promise<number | null> {
+  if (!model || !costUsd || costUsd <= 0) return null;
+  const tables = await loadQuotaMeta();
+  const providerKey = provider ?? "opencode-go";
+  const table = tables[providerKey];
+  if (table) {
+    // 按量计费渠道不显示百分比（无月池概念）
+    if (table.payAsYouGo || table.unit === "count") return null;
+    const monthly = table.monthlyQuotaUsd;
+    const meta = table.models?.[model];
+    if (!monthly || monthly <= 0 || !meta || meta.rate <= 0) return null;
+    const rate = meta.peakRate && isOpencodePeakHours(ts) ? meta.peakRate : meta.rate;
+    return (costUsd * rate) / monthly * 100;
+  }
+  // 兜底：静态 opencode-go 表（接口不可用或该渠道无文件时）
+  return opencodeQuotaPct(model, costUsd, ts);
+}
+
+let metaCache: Promise<Record<string, ProviderQuotaTable>> | null = null;
+
+/** 拉取一次 /api/usage/meta 并缓存（失败返回空表，不抛异常）。 */
+export function loadQuotaMeta(): Promise<Record<string, ProviderQuotaTable>> {
+  if (metaCache) return metaCache;
+  metaCache = (async () => {
+    // SSR/测试环境无 fetch 目标时静默降级
+    if (typeof window === "undefined") return {};
+    try {
+      const res = await fetch(META_URL, { cache: "no-store" });
+      if (!res.ok) return {};
+      const data = (await res.json()) as QuotaMetaResponse;
+      return data.ok ? data.tables : {};
+    } catch {
+      return {};
+    }
+  })();
+  // 失败后允许下次重试
+  metaCache.catch(() => { metaCache = null; });
+  return metaCache;
 }

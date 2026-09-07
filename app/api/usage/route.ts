@@ -583,8 +583,15 @@ export async function PATCH(req: Request) {
 
     // 更新单个模型的手动字段（usage/rate/peakRate）
     if (body.updateModel?.modelId) {
+      const provider = body.updateModel.provider ?? body.syncProvider;
+      if (!provider) {
+        return NextResponse.json(
+          { ok: false, error: "updateModel requires provider (model tables are per-provider)" },
+          { status: 400 },
+        );
+      }
       const models = updateModelMeta(
-        body.updateModel.provider ?? body.syncProvider ?? "opencode-go",
+        provider,
         body.updateModel.modelId,
         {
         usage: body.updateModel.usage,

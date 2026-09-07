@@ -269,6 +269,7 @@ export default function UsagePage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             updateModel: {
+              provider: settingsProvider,
               modelId,
               usage,
               rate,
@@ -289,7 +290,7 @@ export default function UsagePage() {
         setStatusMsg(e instanceof Error ? `保存失败: ${e.message}` : "保存失败");
       }
     },
-    [modelEdits, load, activeProvider],
+    [modelEdits, load, activeProvider, settingsProvider],
   );
 
   const MAX_CHART_DAYS = 30;
