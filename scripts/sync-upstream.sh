@@ -92,6 +92,11 @@ timeout 600 npm install --no-audit --no-fund --include=dev || {
   echo "  npm install 后 install-scripts 被阻止的包：npm install-scripts ls / approve"
   exit 1
 }
+# npm 11 拦截 install-scripts：批准已知安全包并重建 node-pty（无 Linux 预编译，
+# 需系统 /usr/bin/node-gyp；已编译过则幂等秒过）
+npm install-scripts approve node-pty sharp esbuild protobufjs 2>/dev/null || true
+PATH="/usr/bin:$PATH" npm rebuild node-pty 2>/dev/null || true
+node -e "require('node-pty')" 2>/dev/null || { echo "✗ node-pty 原生模块不可用"; exit 1; }
 # jiti 偶发丢失（install 覆盖），确保存在
 [ -d node_modules/jiti ] || npm install jiti --no-audit --no-fund --include=dev
 
@@ -99,9 +104,9 @@ timeout 600 npm install --no-audit --no-fund --include=dev || {
 echo "=== [4/6] tsc --noEmit ==="
 npx tsc --noEmit || { echo "✗ 类型错误"; exit 1; }
 
-# 5) 构建（next 16.2.12）
+# 5) 构建（next 16.2.12；unset TURBOPACK —— 桌面环境该变量与 --webpack 冲突会静默退出）
 echo "=== [5/6] next build --webpack ==="
-timeout 600 npx next build --webpack || { echo "✗ 构建失败"; exit 1; }
+timeout 600 env -u TURBOPACK npx next build --webpack || { echo "✗ 构建失败"; exit 1; }
 
 # 6) 测试
 echo "=== [6/6] 全量测试 ==="
@@ -109,6 +114,32 @@ timeout 600 npm test || { echo "✗ 测试失败"; exit 1; }
 
 echo ""
 echo "✓ 合并验证全部通过：upstream $UPSTREAM_HEAD → fork $FORK_HEAD"
+
+# 7) 可选部署：./sync-upstream.sh [--push] --deploy
+#    备份只留最近 1 份（避免 .next.old-* 攒出 10GB+）
+if [ "${2:-}" = "--deploy" ]; then
+  DEPLOY_DIR="$HOME/.npm-global/lib/node_modules/@agegr/pi-web"
+  TS=$(date +%Y%m%d-%H%M%S)
+  echo "=== [7/7] 部署到 $DEPLOY_DIR ==="
+  mv "$DEPLOY_DIR/.next" "$DEPLOY_DIR/.next.old-$TS"
+  rsync -a --exclude cache .next/ "$DEPLOY_DIR/.next/"
+  rsync -a package.json package-lock.json next.config.ts "$DEPLOY_DIR/"
+  rsync -a --delete public/ "$DEPLOY_DIR/public/"
+  mv "$DEPLOY_DIR/node_modules" "$DEPLOY_DIR/node_modules.old-$TS"
+  rsync -a --delete node_modules/ "$DEPLOY_DIR/node_modules/"
+  # 备份只留最近 1 份
+  ls -dt "$DEPLOY_DIR"/.next.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
+  ls -dt "$DEPLOY_DIR"/node_modules.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
+  systemctl --user restart pi-web
+  sleep 5
+  if curl -sf -o /dev/null http://127.0.0.1:30141/; then
+    echo "✓ 部署完成，服务健康：http://127.0.0.1:30141（旧备份保留一份：.next.old-$TS）"
+  else
+    echo "✗ 服务未响应，请检查：systemctl --user status pi-web"
+    exit 1
+  fi
+fi
+
 if [ "$PUSH" = "--push" ]; then
   git add -A
   git commit -m "Merge upstream main (v$(node -p "require('./package.json').version") | upstream $UPSTREAM_HEAD) into fork" || true
