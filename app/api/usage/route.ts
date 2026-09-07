@@ -11,6 +11,7 @@ const STATE_PATH = join(PI_DIR, "usage-state.json");
 const MODELS_DIR = join(PI_DIR, "usage-tracker", "models");
 const LEGACY_MODELS_PATH = join(PI_DIR, "usage-tracker", "opencode-go-models.json");
 const MODELS_STORE_PATH = join(PI_DIR, "models-store.json");
+const PI_MODELS_PATH = join(PI_DIR, "models.json");
 const MONTHLY_QUOTA_USD = 60.0;
 
 /** 模型表按 provider 分文件：usage-tracker/models/{provider}.json */
@@ -53,11 +54,52 @@ interface StoreModelMeta {
 }
 
 /**
- * 从 ~/.pi/agent/models-store.json 读取各 provider 的模型价格
- * （pi 自动同步的官方目录数据，与 pi 侧定价一致）。
- * 返回 { provider -> { modelId -> { in,out,cr,cw,name } } }。
+ * 从 ~/.pi/agent/models.json 读取自定义渠道的模型价格。
+ * 自定义渠道（如 models.json 里手写的 Command Code）不会进 pi 的
+ * models-store.json，这里作为兑底价格来源。
+ */
+function loadPiConfigPrices(): Record<string, Record<string, StoreModelMeta>> {
+  try {
+    const raw = JSON.parse(readFileSync(PI_MODELS_PATH, "utf-8")) as {
+      providers?: Record<
+        string,
+        {
+          models?: Array<{
+            id?: string;
+            name?: string;
+            cost?: StoreModelCost;
+          }>;
+        }
+      >;
+    };
+    const out: Record<string, Record<string, StoreModelMeta>> = {};
+    for (const [provider, entry] of Object.entries(raw.providers ?? {})) {
+      const map: Record<string, StoreModelMeta> = {};
+      for (const m of entry.models ?? []) {
+        if (!m.id) continue;
+        const c = m.cost ?? {};
+        map[m.id] = {
+          in: c.input ?? 0,
+          out: c.output ?? 0,
+          cr: c.cacheRead ?? 0,
+          cw: c.cacheWrite ?? 0,
+          name: m.name,
+        };
+      }
+      out[provider] = map;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 价格总表：models-store.json（官方目录）优先，
+ * models.json 自定义渠道兑底（store 里没有的 provider 才用）。
  */
 function loadStorePrices(): Record<string, Record<string, StoreModelMeta>> {
+  const config = loadPiConfigPrices();
   try {
     const raw = JSON.parse(readFileSync(MODELS_STORE_PATH, "utf-8")) as Record<
       string,
@@ -80,9 +122,15 @@ function loadStorePrices(): Record<string, Record<string, StoreModelMeta>> {
       }
       out[provider] = map;
     }
+    // store 没有的渠道，用 models.json 自定义渠道兑底
+    for (const [provider, map] of Object.entries(config)) {
+      if (!out[provider] || Object.keys(out[provider]).length === 0) {
+        out[provider] = map;
+      }
+    }
     return out;
   } catch {
-    return {};
+    return config;
   }
 }
 
