@@ -47,14 +47,15 @@ test("preserves status line breaks while normalizing horizontal whitespace", () 
   );
 });
 
-test("keeps status text on a single no-wrap line and scrolls horizontally when long", async () => {
+test("keeps status text on a single no-wrap line and scrolls long output", async () => {
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   const statusLineRule = css.match(/\.extension-status-line\s*\{([^}]*)\}/)?.[1] ?? "";
   const statusTextRule = css.match(/\.extension-status-text\s*\{([^}]*)\}/)?.[1] ?? "";
 
+  // 上游 0.9.0：状态行有高度上限并整体可滚动
   assert.match(statusLineRule, /max-height:/);
-  assert.match(statusLineRule, /overflow-y:\s*auto/);
-  // Single-line labels: long status text scrolls horizontally instead of wrapping
+  assert.match(statusLineRule, /overflow:\s*auto/);
+  // fork：标签保持单行不换行，过长时横向滚动
   assert.match(statusTextRule, /white-space:\s*nowrap/);
   assert.match(statusTextRule, /overflow-x:\s*auto/);
   assert.doesNotMatch(statusTextRule, /overflow-wrap:\s*anywhere/);
