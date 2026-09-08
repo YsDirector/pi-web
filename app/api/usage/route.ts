@@ -296,9 +296,17 @@ interface LedgerEntry {
 
 interface UsageState {
   enabled: boolean;
+  /** 全局周期起点：全部渠道视图上重置时更新（旧格式只有这个字段） */
   periodStartTs: number;
+  /** 渠道独立重置时间：key=provider（单渠道重置时写入；未列出的渠道回退 periodStartTs） */
+  periodStarts?: Record<string, number>;
   /** 各渠道基线：key=provider, value=账本开始前已用百分比 */
   baselines: Record<string, number>;
+}
+
+/** 渠道生效的周期起点：优先该渠道独立重置时间，其次全局起点（0 = 账本起始） */
+function startTsFor(state: UsageState, provider: string): number {
+  return state.periodStarts?.[provider] ?? state.periodStartTs ?? 0;
 }
 
 function loadLedger(): LedgerEntry[] {
@@ -328,14 +336,15 @@ function loadState(): UsageState {
     return {
       enabled: s.enabled !== false,
       periodStartTs: s.periodStartTs ?? 0,
+      periodStarts: { ...(s.periodStarts ?? {}) },
       baselines,
     };
   } catch {
-    return { enabled: true, periodStartTs: 0, baselines: {} };
+    return { enabled: true, periodStartTs: 0, periodStarts: {}, baselines: {} };
   }
 }
 
-function summarize(entries: LedgerEntry[], startTs: number) {
+function summarize(entries: LedgerEntry[], state: UsageState) {
   const total = { costUsd: 0, quotaPct: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, count: 0 };
   // 按 provider:model 分组，避免不同渠道同 ID 模型混淆
   const byModel: Record<string, typeof total & { rate?: number; peakRate?: number; provider?: string; model?: string }> = {};
@@ -345,14 +354,15 @@ function summarize(entries: LedgerEntry[], startTs: number) {
     return modelsCache.get(provider)?.[model];
   };
   for (const e of entries) {
-    if (e.ts < startTs) continue;
+    const prov = (e as LedgerEntry & { provider?: string }).provider ?? "unknown";
+    // 周期过滤按各渠道自己的起点：单渠道重置（如 opencode-go 充值）不影响其他渠道统计
+    if (e.ts < startTsFor(state, prov)) continue;
     total.costUsd += e.costUsd;
     total.quotaPct += e.quotaPct;
     total.inputTokens += e.inputTokens;
     total.outputTokens += e.outputTokens;
     total.totalTokens += e.totalTokens;
     total.count += 1;
-    const prov = (e as LedgerEntry & { provider?: string }).provider ?? "unknown";
     const key = `${prov}:${e.model}`;
     byModel[key] ??= { costUsd: 0, quotaPct: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, count: 0 };
     const m = byModel[key];
@@ -389,7 +399,7 @@ export async function GET(req: Request) {
   const entries = providerParam
     ? allEntries.filter((e) => (e as LedgerEntry & { provider?: string }).provider === providerParam)
     : allEntries;
-  const { total, byModel } = summarize(entries, state.periodStartTs);
+  const { total, byModel } = summarize(entries, state);
   const deltaPct = total.quotaPct;
   // 基线按渠道；渠道类型：payg=按量美元、count=按调用次数、默认=订阅月池
   const activeProvider = providerParam;
@@ -472,11 +482,12 @@ export async function GET(req: Request) {
     provider: providerParam ?? null,
     state: {
       enabled: state.enabled,
-      periodStartTs: state.periodStartTs,
-      periodStartIso: state.periodStartTs
-        ? new Date(state.periodStartTs).toISOString()
+      periodStartTs: activeProvider ? startTsFor(state, activeProvider) : state.periodStartTs,
+      periodStartIso: (activeProvider ? startTsFor(state, activeProvider) : state.periodStartTs)
+        ? new Date(activeProvider ? startTsFor(state, activeProvider) : state.periodStartTs).toISOString()
         : null,
       baselines: state.baselines,
+      periodStarts: state.periodStarts ?? {},
       baselineQuotaPct: state.baselines[activeProvider ?? "opencode-go"] ?? 0,
     },
     quota: {
@@ -530,6 +541,8 @@ export async function GET(req: Request) {
 export async function PATCH(req: Request) {
   try {
     const body = (await req.json()) as {
+      /** 目标渠道：渠道页上的基线/重置操作携带；缺省 = 全部渠道视图（基线走 opencode-go 兑底、重置 = 全局重置） */
+      provider?: string;
       baselineQuotaPct?: number;
       reset?: boolean;
       enabled?: boolean;
@@ -538,6 +551,7 @@ export async function PATCH(req: Request) {
       updateModel?: { provider?: string; modelId?: string; usage?: number; rate?: number; peakRate?: number | null };
     };
     const state = loadState();
+    const targetProvider = typeof body.provider === "string" && body.provider ? body.provider : null;
     const patchProvider = body.syncProvider
       ?? body.updateProviderConfig?.provider
       ?? body.updateModel?.provider
@@ -546,11 +560,20 @@ export async function PATCH(req: Request) {
       if (body.baselineQuotaPct < 0) {
         return NextResponse.json({ ok: false, error: "baselineQuotaPct must be >= 0" }, { status: 400 });
       }
-      state.baselines[patchProvider] = body.baselineQuotaPct;
+      // 基线写入目标渠道：单渠道页带 provider；不带（旧客户端/全部渠道视图）保持 opencode-go 兑底
+      state.baselines[targetProvider ?? patchProvider] = body.baselineQuotaPct;
     }
     if (body.reset) {
-      state.periodStartTs = Date.now();
-      state.baselines = {};
+      if (targetProvider) {
+        // 单渠道重置（充值后）：只重置该渠道周期起点并清零其基线，其他渠道不受影响
+        state.periodStarts = { ...(state.periodStarts ?? {}), [targetProvider]: Date.now() };
+        delete state.baselines[targetProvider];
+      } else {
+        // 全部渠道视图上的重置：全局周期起点 + 清空全部基线（保持旧行为）
+        state.periodStartTs = Date.now();
+        state.periodStarts = {};
+        state.baselines = {};
+      }
     }
     if (typeof body.enabled === "boolean") {
       state.enabled = body.enabled;

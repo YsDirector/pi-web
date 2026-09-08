@@ -32,6 +32,8 @@ interface UsageApiResponse {
     periodStartTs: number;
     periodStartIso: string | null;
     baselines: Record<string, number>;
+    /** 渠道独立重置时间表（非空 = 存在被单独重置过的渠道） */
+    periodStarts?: Record<string, number>;
     baselineQuotaPct: number;
   };
   quota: {
@@ -183,9 +185,15 @@ export default function UsagePage() {
   );
 
   const handleReset = useCallback(() => {
-    if (!confirm("确定重置统计周期？基线会清零，账本从当前时刻重新累计（充值后使用）。")) return;
-    patch({ reset: true });
-  }, [patch]);
+    const p = activeProvider;
+    if (p) {
+      if (!confirm(`确定重置渠道 ${p} 的统计周期？仅该渠道基线清零、从当前时刻重新累计（充值后使用），不影响其他渠道。`)) return;
+      patch({ reset: true, provider: p });
+    } else {
+      if (!confirm("确定重置全部渠道的统计周期？所有渠道基线清零，账本从当前时刻重新累计（充值后使用）。")) return;
+      patch({ reset: true });
+    }
+  }, [patch, activeProvider]);
 
   const handleBaselineSave = useCallback(() => {
     const v = parseFloat(baselineInput);
@@ -193,9 +201,10 @@ export default function UsagePage() {
       setStatusMsg("无效的百分比值");
       return;
     }
-    patch({ baselineQuotaPct: v });
+    // 基线按渠道保存：必须携带当前渠道，否则服务端会兑底写入 opencode-go
+    patch({ baselineQuotaPct: v, provider: activeProvider ?? undefined });
     setEditingBaseline(false);
-  }, [baselineInput, patch]);
+  }, [baselineInput, patch, activeProvider]);
 
   const [providerQuotaInput, setProviderQuotaInput] = useState<string>("60");
   const [providerPaygInput, setProviderPaygInput] = useState<boolean>(false);
@@ -354,10 +363,16 @@ export default function UsagePage() {
           {peakNow
             ? "当前为高峰时段（deepseek-v4 价格 ×2，倍率翻倍）"
             : "当前为空闲时段（deepseek-v4 基础倍率）"}
-          {" · "}月统计自{" "}
-          {state.periodStartIso
-            ? new Date(state.periodStartIso).toLocaleString("zh-CN")
-            : "账本起始（未手动重置）"}
+          {" · "}
+          {provider
+            ? `该渠道统计自 ${state.periodStartIso
+                ? new Date(state.periodStartIso).toLocaleString("zh-CN")
+                : "账本起始"}`
+            : state.periodStarts && Object.keys(state.periodStarts).length > 0
+              ? "各渠道按各自重置时间独立累计（重置只作用于所在渠道页）"
+              : `月统计自 ${state.periodStartIso
+                  ? new Date(state.periodStartIso).toLocaleString("zh-CN")
+                  : "账本起始（未手动重置）"}`}
         </div>
 
         {/* 渠道标签页 */}
