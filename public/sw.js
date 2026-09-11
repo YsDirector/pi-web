@@ -31,12 +31,33 @@ const NON_DATA_SESSION_PATHS = new Set(["/api/sessions/search"]);
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches
-      .open(STATIC_CACHE)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
-      .then(() => self.skipWaiting()),
+    (async () => {
+      const cache = await caches.open(STATIC_CACHE);
+      await cache.addAll(PRECACHE_URLS);
+      await primeShellCache();
+      await self.skipWaiting();
+    })(),
   );
 });
+
+/**
+ * Cache the app shell during install.
+ *
+ * The navigation that triggers the very first visit cannot be captured: the
+ * worker is not controlling the page yet, so the fetch handler never sees that
+ * response. Without priming the shell here, a user who installs the app and
+ * then goes offline would still fall back to offline.html on the next launch.
+ * A failed fetch (offline install) or a redirect to the login page simply
+ * leaves the shell cache empty instead of failing the install.
+ */
+async function primeShellCache() {
+  const request = new Request(new URL("/", self.location.origin));
+  const response = await fetchWithTimeout(request, NAVIGATION_TIMEOUT_MS).catch(() => null);
+  if (!response) return;
+  if (!isCacheableResponse(request, response) || !isHtml(response)) return;
+  const cache = await caches.open(SHELL_CACHE);
+  await cache.put(request, response);
+}
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(

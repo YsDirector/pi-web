@@ -9,6 +9,8 @@ globalThis.self = {
   },
   addEventListener: (type, listener) => listeners.set(type, listener),
   clients: null,
+  // Called by install/activate; the real worker has these on ServiceWorkerGlobalScope.
+  skipWaiting: async () => {},
 };
 
 await import("./sw.js");
@@ -155,6 +157,12 @@ function installCacheStub({ failNetwork = false, redirects = {} } = {}) {
       stores.set(name, {
         entries,
         put: async (request, response) => { entries.set(request.url, response); },
+        addAll: async (requests) => {
+          for (const request of requests) {
+            const url = typeof request === "string" ? request : request.url;
+            entries.set(url, new Response("", { status: 200 }));
+          }
+        },
         match: async (request, options) => {
           const key = typeof request === "string" ? request : request.url;
           if (options?.ignoreSearch) {
@@ -298,4 +306,41 @@ test("a redirect response is not stored under the requested URL", async () => {
 
   const data = await openStore("pi-web-data-test");
   assert.equal(data.entries.size, 0, "login HTML must not be cached as session data");
+});
+
+test("install primes the shell cache so the first visit is already offline-capable", async () => {
+  const { openStore } = installCacheStub();
+  globalThis.fetch = async (request) => {
+    const url = typeof request === "string" ? request : request.url;
+    const response = new Response("<!doctype html><title>Pi Web</title>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+    Object.defineProperty(response, "url", { value: url });
+    Object.defineProperty(response, "type", { value: "basic" });
+    return response;
+  };
+  // addAll() also runs against the stub cache.
+  const staticStore = await openStore("pi-web-static-test");
+  void staticStore;
+
+  let pending;
+  listeners.get("install")({ waitUntil: (promise) => { pending = promise; } });
+  await pending;
+
+  const shell = await caches.open("pi-web-shell-test").then((c) => c.keys());
+  assert.equal(shell.length, 1, "install must prime the shell cache");
+  assert.equal(shell[0].url, "https://pi.test/");
+});
+
+test("install survives an unreachable server", async () => {
+  installCacheStub();
+  globalThis.fetch = async () => { throw new TypeError("offline"); };
+
+  let pending;
+  listeners.get("install")({ waitUntil: (promise) => { pending = promise; } });
+  await pending; // must not reject: an offline install still activates.
+
+  const shell = await caches.open("pi-web-shell-test").then((c) => c.keys());
+  assert.equal(shell.length, 0);
 });
