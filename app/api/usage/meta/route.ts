@@ -27,9 +27,44 @@ interface ModelMeta {
   out: number;
   cr: number;
   cw: number;
+  /** 模型月额度（$）—— 唯一真源，倍率由它派生 */
   usage: number;
-  rate: number;
+  /** @deprecated 手写倍率（已由 usage 派生，此处仅兼容旧数据） */
+  rate?: number;
+  /** @deprecated 绝对高峰倍率，改用 peakMultiplier */
   peakRate?: number;
+  /** 高峰倍率乘数（deepseek-v4 系列 = 2） */
+  peakMultiplier?: number;
+}
+
+/**
+ * 基础倍率 = 渠道月池 / 模型月额度。
+ * 与 lib/opencode-quota.ts 的 deriveBaseRate、usage-tracker 的记账口径三方一致。
+ */
+function deriveBaseRate(
+  monthlyQuotaUsd: number | undefined,
+  usage: number | undefined,
+): number {
+  if (!usage || usage <= 0 || !monthlyQuotaUsd || monthlyQuotaUsd <= 0) return 0;
+  return monthlyQuotaUsd / usage;
+}
+/**
+ * 高峰倍率乘数：优先 peakMultiplier，旧数据回退 peakRate/rate 的比值。
+ * 比值是定价方案级别的事实，不随 usage 变动而失效。
+ */
+function peakMultiplierOf(m: ModelMeta): number {
+  if (typeof m.peakMultiplier === "number" && m.peakMultiplier > 1) {
+    return m.peakMultiplier;
+  }
+  if (
+    typeof m.peakRate === "number" &&
+    typeof m.rate === "number" &&
+    m.rate > 0 &&
+    m.peakRate > m.rate
+  ) {
+    return m.peakRate / m.rate;
+  }
+  return 1;
 }
 
 function modelsPath(provider: string): string {
@@ -84,19 +119,37 @@ export async function GET(req: Request) {
       monthlyQuotaUsd?: number;
       payAsYouGo?: boolean;
       unit?: "usd" | "count";
-      models: Record<string, { usage: number; rate: number; peakRate?: number }>;
+      models: Record<
+        string,
+        { usage: number; rate: number; peakRate?: number; peakMultiplier?: number }
+      >;
     }
   > = {};
   for (const p of providers) {
     const f = readModelsFile(p);
-    const models: Record<string, { usage: number; rate: number; peakRate?: number }> = {};
+    // 渠道月池（缺省用 $60），倍率统一由它派生
+    const monthly = f.monthly_quota_usd;
+    const models: Record<
+      string,
+      { usage: number; rate: number; peakRate?: number; peakMultiplier?: number }
+    > = {};
     for (const [id, m] of Object.entries(f.models ?? {})) {
-      // 只暴露计算百分比所需字段
-      models[id] = { usage: m.usage ?? 0, rate: m.rate ?? 1 };
-      if (m.peakRate !== undefined) models[id].peakRate = m.peakRate;
+      // 只暴露计算百分比所需字段。
+      // rate / peakRate 均为**派生值**（而非表里的手写值），因此即使客户端
+      // 仍是旧版（只读 rate / peakRate）也能得到正确百分比；
+      // 新版客户端则直接用 usage + peakMultiplier 自行派生。
+      const usage = m.usage ?? 0;
+      const base = deriveBaseRate(monthly, usage);
+      const mult = peakMultiplierOf(m);
+      const derived = base > 0 ? base : (m.rate ?? 1);
+      models[id] = { usage, rate: derived };
+      if (mult > 1) {
+        models[id].peakMultiplier = mult;
+        models[id].peakRate = derived * mult;
+      }
     }
     tables[p] = {
-      monthlyQuotaUsd: f.monthly_quota_usd,
+      monthlyQuotaUsd: monthly,
       payAsYouGo: f.payAsYouGo,
       unit: f.unit,
       models,
