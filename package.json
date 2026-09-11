@@ -1,6 +1,6 @@
 {
   "name": "@agegr/pi-web",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Web UI for the pi coding agent",
   "homepage": "https://github.com/agegr/pi-web#readme",
   "repository": {
@@ -49,15 +49,14 @@
     "@xterm/xterm": "6.0.0",
     "ansi_up": "^6.0.6",
     "js-yaml": "^5.2.3",
-    "next": "16.2.12",
-    "node-pty": "1.1.0",
+    "next": "16.3.1",
+    "node-pty": "1.2.0-beta.15",
     "proper-lockfile": "4.1.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "remark-frontmatter": "^5.0.0",
     "semver": "7.8.0",
     "undici": "8.10.0",
-    "unrs-resolver": "^1.11.1",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
@@ -87,12 +86,5 @@
     "remark-math": "^6.0.0",
     "tailwindcss": "^4.2.2",
     "typescript": "^5"
-  },
-  "allowScripts": {
-    "unrs-resolver@1.11.1": true,
-    "esbuild@0.28.1": true,
-    "node-pty@1.1.0": true,
-    "protobufjs@7.6.6": true,
-    "sharp@0.34.5": true
   }
 }
