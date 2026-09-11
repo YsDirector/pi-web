@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { aggregateQuota, channelDrawUsd, isPoolable, type ChannelQuotaStat } from "@/lib/usage-aggregate";
 
 export const dynamic = "force-dynamic";
 
@@ -200,21 +201,50 @@ function syncPricesFromStore(provider: string): {
   return { updated, added, missing, models: next };
 }
 
-/** 更新单个模型的手动字段（usage/rate/peakRate）；返回更新后的完整模型表 */
+/**
+ * 更新单个模型的手动字段；返回更新后的完整模型表。
+ *
+ * 只需维护 `usage`（模型月额度）：写入时会**自动同步派生倍率**
+ * （rate = 渠道月池 / usage，高峰再乘 peakMultiplier），让表里的 rate/peakRate
+ * 永不与 usage 漂移 —— 旧版消费者（只读 rate/peakRate）也能拿到正确值。
+ * 仍接受手动 rate / peakRate 入参（兼容旧客户端，但保存 usage 时会覆盖为派生值）。
+ */
 function updateModelMeta(
   provider: string,
   modelId: string,
-  meta: { usage?: number; rate?: number; peakRate?: number | null },
+  meta: {
+    usage?: number;
+    rate?: number;
+    peakRate?: number | null;
+    peakMultiplier?: number | null;
+  },
 ): Record<string, ModelPrice> {
   const data = readModelsFile(provider);
   const models = data.models ?? {};
-  if (!models[modelId]) models[modelId] = { in: 0, out: 0, cr: 0, cw: 0, usage: 0, rate: 1 };
+  if (!models[modelId]) models[modelId] = { in: 0, out: 0, cr: 0, cw: 0, usage: 0 };
   const m = models[modelId];
+
+  // 高峰乘数：null 显式清除，数字则设置
+  if (meta.peakMultiplier !== undefined) {
+    if (meta.peakMultiplier === null) delete m.peakMultiplier;
+    else m.peakMultiplier = meta.peakMultiplier;
+  }
   if (typeof meta.usage === "number") m.usage = meta.usage;
+  // 手动 rate 仅作兼容入参；若本轮同时给了 usage，下面会被派生值覆盖
   if (typeof meta.rate === "number") m.rate = meta.rate;
   if (meta.peakRate !== undefined) {
     if (meta.peakRate === null) delete m.peakRate;
     else m.peakRate = meta.peakRate;
+  }
+
+  // 写入 usage 后，把派生倍率同步回 rate / peakRate，消除双源漂移
+  const pool = data.monthly_quota_usd ?? MONTHLY_QUOTA_USD;
+  const base = deriveBaseRate(pool, m.usage);
+  if (base > 0) {
+    m.rate = base;
+    const mult = peakMultiplierOf(m);
+    if (mult > 1) m.peakRate = base * mult;
+    else delete m.peakRate;
   }
   writeModelsFile(provider, { ...data, models });
   return models;
@@ -225,9 +255,41 @@ interface ModelPrice {
   out: number;
   cr: number;
   cw: number;
+  /** 模型月额度（$）—— 唯一真源，倍率由它派生 */
   usage: number;
-  rate: number;
+  /** @deprecated 手写倍率（已改为派生），仅做旧数据兑底 */
+  rate?: number;
+  /** @deprecated 绝对高峰倍率，改用 peakMultiplier */
   peakRate?: number;
+  /** 高峰倍率乘数（deepseek-v4 系列 = 2） */
+  peakMultiplier?: number;
+}
+
+/**
+ * 基础倍率 = 渠道月池 / 模型月额度。模型额度为 0 或月池缺失时返回 0。
+ * 与 lib/opencode-quota.ts、usage-tracker 扩展三方同口径。
+ */
+function deriveBaseRate(monthlyQuotaUsd: number, usage: number | undefined): number {
+  if (!usage || usage <= 0 || !(monthlyQuotaUsd > 0)) return 0;
+  return monthlyQuotaUsd / usage;
+}
+
+/**
+ * 高峰倍率乘数。优先 peakMultiplier；旧数据只有绝对 peakRate 时用
+ * peakRate/rate 的**比值**还原乘数 —— 比值是定价方案级别的事实，不随 usage 失效。
+ * 与 lib/opencode-quota.ts、usage-tracker 扩展三方同口径。
+ */
+function peakMultiplierOf(m: ModelPrice | undefined): number {
+  if (!m) return 1;
+  if (typeof m.peakMultiplier === "number" && m.peakMultiplier > 1) {
+    return m.peakMultiplier;
+  }
+  const r = m.rate;
+  const pr = m.peakRate;
+  if (typeof pr === "number" && typeof r === "number" && r > 0 && pr > r) {
+    return pr / r;
+  }
+  return 1;
 }
 
 function loadModels(provider?: string): Record<string, ModelPrice> {
@@ -347,11 +409,20 @@ function loadState(): UsageState {
 function summarize(entries: LedgerEntry[], state: UsageState) {
   const total = { costUsd: 0, quotaPct: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, count: 0 };
   // 按 provider:model 分组，避免不同渠道同 ID 模型混淆
-  const byModel: Record<string, typeof total & { rate?: number; peakRate?: number; provider?: string; model?: string }> = {};
+  const byModel: Record<string, typeof total & { rate?: number; peakRate?: number; peakMultiplier?: number; provider?: string; model?: string }> = {};
   const modelsCache = new Map<string, Record<string, ModelPrice>>();
   const modelFor = (provider: string, model: string) => {
     if (!modelsCache.has(provider)) modelsCache.set(provider, loadModels(provider));
     return modelsCache.get(provider)?.[model];
+  };
+  // 渠道月池缓存（用于派生倍率 = 月池 / 模型月额度）
+  const quotaCache = new Map<string, number>();
+  const quotaFor = (provider: string) => {
+    if (!quotaCache.has(provider)) {
+      const q = readModelsFile(provider).monthly_quota_usd;
+      quotaCache.set(provider, typeof q === "number" && q > 0 ? q : MONTHLY_QUOTA_USD);
+    }
+    return quotaCache.get(provider) ?? MONTHLY_QUOTA_USD;
   };
   for (const e of entries) {
     const prov = (e as LedgerEntry & { provider?: string }).provider ?? "unknown";
@@ -380,8 +451,18 @@ function summarize(entries: LedgerEntry[], state: UsageState) {
     agg.provider = prov;
     agg.model = modelId;
     if (meta) {
-      agg.rate = isPeakHours() && meta.peakRate ? meta.peakRate : meta.rate;
-      agg.peakRate = meta.peakRate;
+      // 倍率由 usage 派生（= 渠道月池 / 模型月额度），不再读表里手写 rate；
+      // 旧数据无 usage 时退回手写 rate 做兑底。
+      const usage = meta.usage ?? 0;
+      const derived = deriveBaseRate(quotaFor(prov), usage);
+      const base = derived > 0 ? derived : (meta.rate ?? 1);
+      const mult = peakMultiplierOf(meta);
+      const peak = isPeakHours() && mult > 1;
+      agg.rate = peak ? base * mult : base;
+      if (mult > 1) {
+        agg.peakMultiplier = mult;
+        agg.peakRate = base * mult;
+      }
       (agg as Record<string, unknown>).modelUsage = meta.usage;
     }
   }
@@ -429,6 +510,33 @@ export async function GET(req: Request) {
       }),
     ).keys(),
   );
+
+  // ── 渠道级口径（用于「全部渠道」的合计）────────────────────────────────
+  //
+  // 各渠道月池**互相独立、不可转移**，所以跨渠道合计不能直接把百分比相加
+  // （那样得到的是「各池占用率之和」，不是任何单一池的比例）。口径实现见
+  // lib/usage-aggregate.ts（纯函数 + 单测），此处只装配每渠道的原始数字：
+  //   渠道池消耗金额 = ΣquotaPct/100 × 池 = Σ(cost × rate)
+  //   合计百分比     = Σ池消耗金额 / Σ月池 × 100   ← 金额加权
+  const channelStats: ChannelQuotaStat[] = providers.map((prov) => {
+    const meta = readModelsFile(prov);
+    const perChannel = summarize(
+      allEntries.filter((e) => ((e as LedgerEntry & { provider?: string }).provider ?? "unknown") === prov),
+      state,
+    );
+    return {
+      provider: prov,
+      pool: meta.monthly_quota_usd ?? 0,
+      unit: meta.unit ?? "usd",
+      payAsYouGo: meta.payAsYouGo === true,
+      deltaPct: perChannel.total.quotaPct,
+      baseline: state.baselines?.[prov] ?? 0,
+      costUsd: perChannel.total.costUsd,
+      count: perChannel.total.count,
+    };
+  });
+  const { poolSum, baselineSum, deltaPct: aggregateDeltaPct, totalPct: aggregatePct } =
+    aggregateQuota(channelStats);
 
   // 每日 × 渠道聚合（北京时间日期），图表按渠道堆叠显示
   interface DailyProvider {
@@ -488,18 +596,38 @@ export async function GET(req: Request) {
         : null,
       baselines: state.baselines,
       periodStarts: state.periodStarts ?? {},
-      baselineQuotaPct: state.baselines[activeProvider ?? "opencode-go"] ?? 0,
+      // 单渠道：该渠道基线；全部渠道：可入池渠道的基线之和（原来是硬取 opencode-go 的值）
+      baselineQuotaPct: activeProvider
+        ? (state.baselines[activeProvider] ?? 0)
+        : baselineSum,
     },
     quota: {
-      monthlyQuotaUsd: activeProvider ? (providerMeta?.monthly_quota_usd ?? MONTHLY_QUOTA_USD) : MONTHLY_QUOTA_USD,
-      payAsYouGo,
-      unit,
+      // 全部渠道：Σ 各渠道月池（仅美元订阅池渠道）；单渠道：该渠道月池
+      monthlyQuotaUsd: activeProvider
+        ? (providerMeta?.monthly_quota_usd ?? MONTHLY_QUOTA_USD)
+        : poolSum,
+      payAsYouGo: activeProvider ? payAsYouGo : poolSum === 0,
+      unit: activeProvider ? unit : "usd",
       countUsed: total.count,
       baseQuotaUsd: models["deepseek-v4-flash"]?.usage ?? 30,
-      totalPct,
-      deltaPct,
+      // 全部渠道：金额加权合计（Σ池消耗$ / Σ池$）；单渠道：基线 + ΣquotaPct
+      totalPct: activeProvider ? totalPct : aggregatePct,
+      deltaPct: activeProvider ? deltaPct : aggregateDeltaPct,
       costUsd: total.costUsd,
       count: total.count,
+      // 「全部渠道」视图的分渠道明细（池 / 已用 / 占比），供面板分行展示
+      channels: activeProvider
+        ? undefined
+        : channelStats.map((c) => ({
+            provider: c.provider,
+            pool: c.pool,
+            unit: c.unit,
+            payAsYouGo: c.payAsYouGo,
+            pct: isPoolable(c) ? c.baseline + c.deltaPct : null,
+            drawUsd: channelDrawUsd(c),
+            costUsd: c.costUsd,
+            count: c.count,
+          })),
       tokens: {
         input: total.inputTokens,
         output: total.outputTokens,
@@ -548,7 +676,17 @@ export async function PATCH(req: Request) {
       enabled?: boolean;
       syncProvider?: string;
       updateProviderConfig?: { provider?: string; monthlyQuotaUsd?: number; payAsYouGo?: boolean; unit?: "usd" | "count" };
-      updateModel?: { provider?: string; modelId?: string; usage?: number; rate?: number; peakRate?: number | null };
+      updateModel?: {
+        provider?: string;
+        modelId?: string;
+        usage?: number;
+        /** @deprecated 已改为由 usage 派生；保存 usage 时会被覆盖 */
+        rate?: number;
+        /** @deprecated 改用 peakMultiplier */
+        peakRate?: number | null;
+        /** 高峰倍率乘数（deepseek-v4 系列 = 2）；null 清除 */
+        peakMultiplier?: number | null;
+      };
     };
     const state = loadState();
     const targetProvider = typeof body.provider === "string" && body.provider ? body.provider : null;
@@ -620,6 +758,7 @@ export async function PATCH(req: Request) {
         usage: body.updateModel.usage,
         rate: body.updateModel.rate,
         peakRate: body.updateModel.peakRate,
+        peakMultiplier: body.updateModel.peakMultiplier,
       });
       return NextResponse.json({ ok: true, state, models });
     }

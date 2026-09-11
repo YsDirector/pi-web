@@ -46,6 +46,18 @@ interface UsageApiResponse {
     costUsd: number;
     count: number;
     tokens: { input: number; output: number; total: number };
+    /** 仅「全部渠道」视图返回：各渠道各自的池与已用（池不可转移，故分行展示） */
+    channels?: Array<{
+      provider: string;
+      pool: number;
+      unit: string;
+      payAsYouGo: boolean;
+      /** 该渠道池占用%（美元订阅池渠道才有；其余为 null） */
+      pct: number | null;
+      drawUsd: number;
+      costUsd: number;
+      count: number;
+    }>;
   };
   daily: DailyAgg[];
   byModel: Array<{
@@ -61,7 +73,7 @@ interface UsageApiResponse {
     peakRate?: number;
     modelUsageUsd?: number;
   }>;
-  models: Array<{ id: string; provider?: string | null; usageUsd: number; rate: number; peakRate?: number; inPrice: number; outPrice: number; crPrice: number; cwPrice: number }>;
+  models: Array<{ id: string; provider?: string | null; usageUsd: number; rate: number; peakRate?: number; peakMultiplier?: number; inPrice: number; outPrice: number; crPrice: number; cwPrice: number }>;
   storePrices: Record<string, Record<string, { in: number; out: number; cr: number; cw: number; name?: string }>>;
   peakNow: boolean;
   ledger: Array<{
@@ -142,7 +154,7 @@ export default function UsagePage() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const [settingsProvider, setSettingsProvider] = useState<string>("opencode-go");
-  const [modelEdits, setModelEdits] = useState<Record<string, { usage?: string; rate?: string; peakRate?: string }>>({});
+  const [modelEdits, setModelEdits] = useState<Record<string, { usage?: string; rate?: string; peakMultiplier?: string }>>({});
 
   const load = useCallback(async (provider: string | null) => {
     setLoading(true);
@@ -267,8 +279,8 @@ export default function UsagePage() {
       if (!edit) return;
       const usage = edit.usage !== undefined && edit.usage !== "" ? parseFloat(edit.usage) : undefined;
       const rate = edit.rate !== undefined && edit.rate !== "" ? parseFloat(edit.rate) : undefined;
-      const peakRate = edit.peakRate !== undefined && edit.peakRate !== "" ? parseFloat(edit.peakRate) : undefined;
-      if ((usage !== undefined && !Number.isFinite(usage)) || (rate !== undefined && !Number.isFinite(rate)) || (peakRate !== undefined && !Number.isFinite(peakRate))) {
+      const peakMultiplier = edit.peakMultiplier !== undefined && edit.peakMultiplier !== "" ? parseFloat(edit.peakMultiplier) : undefined;
+      if ((usage !== undefined && !Number.isFinite(usage)) || (rate !== undefined && !Number.isFinite(rate)) || (peakMultiplier !== undefined && !Number.isFinite(peakMultiplier))) {
         setStatusMsg("无效的数值");
         return;
       }
@@ -282,7 +294,7 @@ export default function UsagePage() {
               modelId,
               usage,
               rate,
-              peakRate: peakRate === undefined ? undefined : peakRate,
+              peakMultiplier: peakMultiplier === undefined ? undefined : peakMultiplier,
             },
           }),
         });
@@ -446,9 +458,13 @@ export default function UsagePage() {
         {/* 进度条（订阅月池 / 按次计费显示；纯按量美元不显示） */}
         {!quota.payAsYouGo && quota.totalPct !== null && (
           <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 10, padding: 18, marginBottom: 24 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
               <span style={{ fontWeight: 600 }}>
-                {quota.unit === "count" ? `次数池 ${quota.monthlyQuotaUsd} 次` : `月池 ${fmtUsd(quota.monthlyQuotaUsd)}`}
+                {quota.unit === "count"
+                  ? `次数池 ${quota.monthlyQuotaUsd} 次`
+                  : provider === null
+                    ? `月池 ${fmtUsd(quota.monthlyQuotaUsd)} 合计`
+                    : `月池 ${fmtUsd(quota.monthlyQuotaUsd)}`}
               </span>
               <span style={{ color: quota.totalPct >= 80 ? "#ef4444" : quota.totalPct >= 60 ? "#f59e0b" : "var(--text-dim)" }}>
                 {quota.totalPct.toFixed(2)}% 已消耗
@@ -470,6 +486,63 @@ export default function UsagePage() {
               {makeBar(quota.totalPct, 40)} {quota.totalPct.toFixed(2)}%
               {quota.unit === "count" && ` · ${quota.countUsed ?? 0}/${quota.monthlyQuotaUsd} 次`}
             </div>
+            {provider === null && (
+              <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 6 }}>
+                  各渠道独立额度（不可转移），合计% 按金额加权：
+                </div>
+                {(quota.channels ?? [])
+                  .filter((c) => c.pool > 0 || c.costUsd > 0)
+                  .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1))
+                  .map((c) => (
+                    <div
+                      key={c.provider}
+                      style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "3px 0" }}
+                    >
+                      <span style={{ minWidth: 92, color: "var(--text)" }}>{c.provider}</span>
+                      <span style={{ minWidth: 46, color: "var(--text-dim)", fontFamily: "monospace" }}>
+                        {c.payAsYouGo || c.pool === 0 ? "按量" : fmtUsd(c.pool)}
+                      </span>
+                      {c.pct !== null ? (
+                        <>
+                          <span
+                            style={{
+                              flex: 1,
+                              height: 10,
+                              background: "var(--border)",
+                              borderRadius: 3,
+                              overflow: "hidden",
+                              display: "flex",
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: `${Math.min(100, c.pct)}%`,
+                                background: "linear-gradient(90deg, var(--accent), #f59e0b)",
+                                display: "block",
+                              }}
+                            />
+                          </span>
+                          <span
+                            style={{
+                              minWidth: 54,
+                              textAlign: "right",
+                              fontFamily: "monospace",
+                              color: c.pct >= 80 ? "#ef4444" : c.pct >= 60 ? "#f59e0b" : "var(--text-dim)",
+                            }}
+                          >
+                            {c.pct.toFixed(2)}%
+                          </span>
+                        </>
+                      ) : (
+                        <span style={{ flex: 1, textAlign: "right", color: "var(--text-dim)", fontFamily: "monospace" }}>
+                          {fmtUsd(c.costUsd)}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -854,6 +927,7 @@ interface SettingsViewModel {
   usageUsd: number;
   rate: number;
   peakRate?: number;
+  peakMultiplier?: number;
   inPrice: number;
   outPrice: number;
   crPrice: number;
@@ -863,7 +937,7 @@ interface SettingsViewModel {
 interface ModelMetaEdit {
   usage?: string;
   rate?: string;
-  peakRate?: string;
+  peakMultiplier?: string;
 }
 
 function SettingsView({
@@ -989,8 +1063,8 @@ function SettingsView({
               <th style={thStyle()}>缓存读</th>
               <th style={thStyle()}>缓存写</th>
               <th style={thStyle()}>模型额度 $（倍率=总额度/此值）</th>
-              <th style={thStyle()}>倍率</th>
-              <th style={thStyle()}>高峰倍率</th>
+              <th style={thStyle()}>倍率（自动）</th>
+              <th style={thStyle()}>高峰乘数</th>
               <th style={thStyle()}></th>
             </tr>
           </thead>
@@ -1005,11 +1079,13 @@ function SettingsView({
               const cwPrice = m?.cwPrice ?? sp?.cw ?? 0;
               const isNew = !m && !!sp; // 在 pi 目录里但模型表还没有（点同步后变 added）
               const modelUsage = edit.usage !== undefined ? parseFloat(edit.usage) : (m?.usageUsd ?? 0);
-              // 倍率自动 = 渠道总额度 / 模型额度（模型额度 0 时回退手动 rate）
+              // 倍率自动 = 渠道总额度 / 模型额度（后端/记账/聊天页三方同口径，只读展示）
               const autoRate = modelUsage > 0 && monthlyQuotaUsd > 0
                 ? monthlyQuotaUsd / modelUsage
-                : (m?.rate ?? 1);
-              const rateShown = edit.rate !== undefined ? edit.rate : String(autoRate === m?.rate ? m?.rate : autoRate);
+                : 0;
+              // 高峰乘数：新字段优先，旧数据用 peakRate/rate 比值回退
+              const autoMult = m?.peakMultiplier
+                ?? (m?.peakRate && m?.rate && m.rate > 0 ? m.peakRate / m.rate : null);
               return (
                 <tr key={id} style={{ borderTop: "1px solid var(--border)" }}>
                   <td style={tdStyle()}>
@@ -1032,27 +1108,29 @@ function SettingsView({
                     />
                   </td>
                   <td style={tdStyle()}>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={rateShown}
-                      placeholder="自动"
-                      onChange={(e) => onEditChange(id, "rate", e.target.value)}
-                      style={inputStyle()}
-                    />
+                    {edit.usage !== undefined
+                      ? <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{autoRate > 0 ? autoRate.toFixed(2).replace(/\.00$/, "") : "—"}</span>
+                      : <input
+                          type="number"
+                          step="0.1"
+                          value={edit.rate ?? ""}
+                          placeholder="自动"
+                          onChange={(e) => onEditChange(id, "rate", e.target.value)}
+                          style={inputStyle()}
+                        />}
                   </td>
                   <td style={tdStyle()}>
                     <input
                       type="number"
                       step="0.1"
-                      value={edit.peakRate ?? m?.peakRate ?? ""}
-                      placeholder="—"
-                      onChange={(e) => onEditChange(id, "peakRate", e.target.value)}
+                      value={edit.peakMultiplier ?? ""}
+                      placeholder={autoMult ? `×${autoMult}` : "—"}
+                      onChange={(e) => onEditChange(id, "peakMultiplier", e.target.value)}
                       style={inputStyle()}
                     />
                   </td>
                   <td style={tdStyle()}>
-                    {(edit.usage !== undefined || edit.rate !== undefined || edit.peakRate !== undefined) && (
+                    {(edit.usage !== undefined || edit.rate !== undefined || edit.peakMultiplier !== undefined) && (
                       <button onClick={() => onSaveModel(id)} style={{ ...btnStyle("var(--accent)"), fontSize: 10, padding: "4px 10px" }}>保存</button>
                     )}
                   </td>
