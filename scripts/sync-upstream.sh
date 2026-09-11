@@ -86,8 +86,13 @@ fi
 
 # 3) 依赖 + 版本固定
 echo "=== [3/6] 依赖安装（next 固定 16.2.12，Node 26 SIGBUS 规避）==="
+# 记录安装前的 next 版本：版本变化时必须丢弃 .next，否则陈旧生成物会毒害后续步骤
+PREV_NEXT=$(node -p "require('./node_modules/next/package.json').version" 2>/dev/null || echo none)
 # 确保 next 版本固定，避免 install 升级回 16.3.1
-grep -q '"next": "16.2.12"' package.json || sed -i 's/"next": "^[0-9.]*"/"next": "16.2.12"/' package.json
+# 注意：上游 package.json 用精确版本（"16.3.1"），fork 曾经用 caret 范围（"^16.3.1"），
+# 两种形态都要能改写——旧正则只匹配 caret 形式，升级后会静默失效导致 SIGBUS 复发。
+grep -q '"next": "16.2.12"' package.json || sed -i -E 's/("next":[[:space:]]*)"[~^]?[0-9][0-9.]*"/\1"16.2.12"/' package.json
+grep -q '"next": "16.2.12"' package.json || { echo "✗ next 固定 16.2.12 失败，检查 package.json"; exit 1; }
 timeout 600 npm install --no-audit --no-fund --include=dev || {
   echo "  npm install 后 install-scripts 被阻止的包：npm install-scripts ls / approve"
   exit 1
@@ -101,6 +106,16 @@ node -e "require('node-pty')" 2>/dev/null || { echo "✗ node-pty 原生模块�
 [ -d node_modules/jiti ] || npm install jiti --no-audit --no-fund --include=dev
 
 # 4) 类型检查
+# tsconfig 的 include 含 .next/types/**/*.ts，而这些是 next build 生成的。版本变化后
+# 旧类型会引用新版本才有的导出（如 16.3.1 的 Prefetch）→ tsc 报几十条假错误。
+# 只删生成物、保留 .next/cache 构建缓存。
+NEW_NEXT=$(node -p "require('./node_modules/next/package.json').version")
+if [ "$PREV_NEXT" != "$NEW_NEXT" ]; then
+  echo "  next 版本变化（$PREV_NEXT → $NEW_NEXT）：丢弃陈旧的 .next 生成物"
+  rm -rf .next
+fi
+rm -rf .next/types .next/dev/types
+
 echo "=== [4/6] tsc --noEmit ==="
 npx tsc --noEmit || { echo "✗ 类型错误"; exit 1; }
 
