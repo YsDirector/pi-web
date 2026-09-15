@@ -35,6 +35,16 @@ test("renders extension confirmation and options as markdown", () => {
   assert.match(dialogSource, /ref=\{index === 0 \? focusFirstOption : undefined\}/);
 });
 
+test("pins the title head in the header and keeps body newlines", () => {
+  assert.match(source, /const \{ head: titleHead, rest: titleRest \} = splitDialogTitle\(request\.title\)/);
+  assert.match(source, /import \{ splitDialogTitle \} from "@\/lib\/dialog-title"/);
+  const header = dialogSource.slice(dialogSource.indexOf('role="dialog"'), dialogSource.indexOf('{request.method === "confirm"'));
+  // A long title must not push the options and buttons out of view.
+  assert.match(header, /maxHeight: "50%", overflowY: "auto"/);
+  assert.match(header, /\{titleHead\}/);
+  assert.match(header, /renderDialogTitle\(titleRest\)/);
+});
+
 test("resets collapse state when a new extension request arrives", () => {
   assert.match(source, /<ExtensionDialog key=\{extensionDialog.id\}/);
   assert.match(source, /<ExtensionCustomPanel key=\{extensionCustomUi.id\}/);
