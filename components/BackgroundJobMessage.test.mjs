@@ -82,6 +82,21 @@ test("failed jobs use the tool-card error colors", () => {
   assert.match(markup, /color:#f87171;font-family:var\(--font-mono\);font-weight:600/);
 });
 
+test("timeout, killed, oversize and lost jobs all render as failures", () => {
+  // 只有 status === "done" 且退出码为 0 才算正常；这几种异常即使拿不到退出码也要标红。
+  for (const status of ["failed", "timeout", "killed", "oversize", "lost"]) {
+    const markup = render({
+      role: "custom",
+      customType: "bash-bg",
+      display: true,
+      content: `bash> [后台任务 #9 ${status}] 无退出码 · 用时 8s · pid=1`,
+      details: { jobs: [{ id: 9, status, exitCode: null }] },
+    });
+    assert.match(markup, /border:1px solid rgba\(248,113,113,0\.45\)/, `${status} 应该用红边框`);
+    assert.match(markup, /color:#f87171;font-family:var\(--font-mono\);font-weight:600/, `${status} 应该用红标签`);
+  }
+});
+
 test("old receipts without job details still render as a successful card", () => {
   const markup = render({ role: "custom", customType: "bash-bg", display: true, content: delivery });
   assert.match(markup, /border:1px solid rgba\(34,197,94,0\.25\)/);
