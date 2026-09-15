@@ -3,12 +3,13 @@
 import { memo, useState, useRef, useEffect, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import { MarkdownBody } from "./MarkdownBody";
+import { BackgroundJobMessageView } from "./BackgroundJobMessage";
 import { ImagePreview } from "./ImagePreview";
 import { ThinkingIcon } from "./ThinkingIcon";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
-import { getAssistantErrorMessage, getThinkingPreview, isEmptyThinkingBlock } from "@/lib/message-display";
+import { BACKGROUND_JOB_CUSTOM_TYPE, getAssistantErrorMessage, getThinkingPreview, isEmptyThinkingBlock } from "@/lib/message-display";
 import { usageQuotaPct } from "@/lib/opencode-quota";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { isEditToolName } from "@/lib/tool-names";
@@ -285,6 +286,10 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   if (message.role === "custom") {
     if ((message as CustomMessage).customType === "compaction") {
       return <CompactionMessageView message={message as CustomMessage} />;
+    }
+    // 后台任务回执（bash-bg）：与工具调用卡片同型的可折叠卡片，默认收起。
+    if ((message as CustomMessage).customType === BACKGROUND_JOB_CUSTOM_TYPE) {
+      return <BackgroundJobMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} />;
     }
     return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} />;
   }

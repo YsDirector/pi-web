@@ -8,9 +8,16 @@ export function getThinkingPreview(thinking: string): string {
   return thinking.trimStart().match(/^[^\r\n]{0,240}/u)?.[0].trimEnd() ?? "";
 }
 
+/**
+ * bash-bg 扩展把后台任务回执当成自定义消息投递时使用的 customType。
+ * 这类消息要像用户消息一样自成一段（否则会被并进上一轮的「过程详情」折叠区）。
+ */
+export const BACKGROUND_JOB_CUSTOM_TYPE = "bash-bg";
+
 export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; customType?: string }): boolean {
   return message.role === "user"
-    || (message.role === "custom" && message.customType === "compaction");
+    || (message.role === "custom"
+      && (message.customType === "compaction" || message.customType === BACKGROUND_JOB_CUSTOM_TYPE));
 }
 
 export function isEmptyThinkingBlock(block: AssistantContentBlock, options: DisplayOptions = {}): block is ThinkingContent {
