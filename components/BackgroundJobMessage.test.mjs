@@ -82,9 +82,8 @@ test("failed jobs use the tool-card error colors", () => {
   assert.match(markup, /color:#f87171;font-family:var\(--font-mono\);font-weight:600/);
 });
 
-test("timeout, killed, oversize and lost jobs all render as failures", () => {
-  // 只有 status === "done" 且退出码为 0 才算正常；这几种异常即使拿不到退出码也要标红。
-  for (const status of ["failed", "timeout", "killed", "oversize", "lost"]) {
+test("failed, oversize and lost jobs render red", () => {
+  for (const status of ["failed", "oversize", "lost"]) {
     const markup = render({
       role: "custom",
       customType: "bash-bg",
@@ -95,6 +94,41 @@ test("timeout, killed, oversize and lost jobs all render as failures", () => {
     assert.match(markup, /border:1px solid rgba\(248,113,113,0\.45\)/, `${status} 应该用红边框`);
     assert.match(markup, /color:#f87171;font-family:var\(--font-mono\);font-weight:600/, `${status} 应该用红标签`);
   }
+});
+
+test("timeout and killed jobs use the amber palette", () => {
+  // 没跑完 ≠ 跑错了：超时 / 被终止用琥珀，避免把一堆「真错」和「被打断」混成一片红。
+  for (const status of ["timeout", "killed"]) {
+    const markup = render({
+      role: "custom",
+      customType: "bash-bg",
+      display: true,
+      content: `bash> [后台任务 #9 ${status}] 无退出码 · 用时 8s · pid=1`,
+      details: { jobs: [{ id: 9, status, exitCode: null }] },
+    });
+    assert.match(markup, /border:1px solid rgba\(245,158,11,0\.45\)/, `${status} 应该用琥珀边框`);
+    assert.match(markup, /color:#d97706;font-family:var\(--font-mono\);font-weight:600/, `${status} 应该用琥珀标签`);
+  }
+});
+
+test("a merged batch takes the most severe job's palette", () => {
+  const mixed = render({
+    role: "custom",
+    customType: "bash-bg",
+    display: true,
+    content: "bash> [后台任务 #9 超时终止] ...\n\nbash> [后台任务 #10 失败] ...",
+    details: { jobs: [{ id: 9, status: "timeout", exitCode: null }, { id: 10, status: "failed", exitCode: 2 }] },
+  });
+  assert.match(mixed, /border:1px solid rgba\(248,113,113,0\.45\)/);
+
+  const warningsOnly = render({
+    role: "custom",
+    customType: "bash-bg",
+    display: true,
+    content: "bash> [后台任务 #9 超时终止] ...\n\nbash> [后台任务 #11 完成] exit=0 ...",
+    details: { jobs: [{ id: 9, status: "timeout", exitCode: null }, { id: 11, status: "done", exitCode: 0 }] },
+  });
+  assert.match(warningsOnly, /border:1px solid rgba\(245,158,11,0\.45\)/);
 });
 
 test("old receipts without job details still render as a successful card", () => {
