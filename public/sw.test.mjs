@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 const listeners = new Map();
 globalThis.self = {
@@ -218,6 +218,11 @@ function installCacheStub({ failNetwork = false, redirects = {} } = {}) {
   return { stores, fetches, openStore };
 }
 
+// The three bounded-fetch tests below use installCacheStub() rather than upstream's
+// installOfflineStub(): the fork's sw.js opens SHELL_CACHE/DATA_CACHE and calls
+// cache.match()/keys() on them, which upstream's bare `open: () => ({ put })` stub
+// cannot serve.
+
 function dispatchFetch(url, { mode = "cors", method = "GET" } = {}) {
   let pending;
   const request = new Request(url, { method });
@@ -343,4 +348,88 @@ test("install survives an unreachable server", async () => {
 
   const shell = await caches.open("pi-web-shell-test").then((c) => c.keys());
   assert.equal(shell.length, 0);
+});
+
+/** fetch() that never settles until the signal it was handed is aborted. */
+function installHungNetwork() {
+  let aborted = false;
+  globalThis.fetch = (_request, init) =>
+    new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => {
+        aborted = true;
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+      });
+    });
+  return () => aborted;
+}
+
+/**
+ * Let a handler's await chain reach its fetch (and schedule its timer) before
+ * the fake clock is ticked. setImmediate is not faked, unlike setTimeout.
+ */
+const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a stalled navigation falls back to the offline page", async () => {
+  installCacheStub();
+  const wasAborted = installHungNetwork();
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const pending = dispatchFetch("https://pi.test/", { mode: "navigate" });
+    await flushMicrotasks();
+    mock.timers.tick(8000);
+    const response = await pending;
+
+    assert.equal(wasAborted(), true, "a hung upstream must be aborted, not awaited forever");
+    // With nothing cached, handleNavigation() ends at its self-contained offline page.
+    assert.match(await response.text(), /Pi Web is offline/);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a stalled static asset request is bounded as well", async () => {
+  installCacheStub();
+  const wasAborted = installHungNetwork();
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const pending = dispatchFetch("https://pi.test/_next/static/chunks/app.js");
+    // networkFirst awaits the cache lookup before it reaches the network.
+    await flushMicrotasks();
+    mock.timers.tick(8000);
+
+    assert.equal(wasAborted(), true, "a hung asset fetch must be aborted, not awaited forever");
+    // networkFirst swallows the abort and answers with a network error instead of
+    // rejecting, so respondWith() never throws inside the worker.
+    const response = await pending;
+    assert.equal(response.type, "error");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a response that arrives in time is not cut off mid-stream", async () => {
+  installCacheStub();
+  let signal;
+  globalThis.fetch = async (_request, init) => {
+    signal = init.signal;
+    return new Response("<!doctype html><title>Pi Web</title>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+  };
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const response = await dispatchFetch("https://pi.test/", { mode: "navigate" });
+    // The budget only covers time to first byte: a long-lived body keeps
+    // streaming past it (Next.js streams its SSR payload).
+    mock.timers.tick(60000);
+
+    assert.equal(signal.aborted, false);
+    assert.match(await response.text(), /<title>Pi Web<\/title>/);
+  } finally {
+    mock.timers.reset();
+  }
 });

@@ -15,9 +15,13 @@ export function getThinkingPreview(thinking: string): string {
 export const BACKGROUND_JOB_CUSTOM_TYPE = "bash-bg";
 
 export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; customType?: string }): boolean {
+  // A background subagent completion starts a new displayed turn, same as a
+  // user message or compaction summary. Other custom messages stay inside the turn.
   return message.role === "user"
     || (message.role === "custom"
-      && (message.customType === "compaction" || message.customType === BACKGROUND_JOB_CUSTOM_TYPE));
+      && (message.customType === "compaction" || message.customType === BACKGROUND_JOB_CUSTOM_TYPE))
+    // A background subagent completion also starts its own turn.
+    || (message.role === "custom" && message.customType === "pi-web:subagent-notification");
 }
 
 export function isEmptyThinkingBlock(block: AssistantContentBlock, options: DisplayOptions = {}): block is ThinkingContent {
@@ -37,6 +41,26 @@ export function getAssistantErrorMessage(
 ): string | null {
   if (options.isStreaming || message.stopReason !== "error") return null;
   return message.errorMessage?.trim() || "Unknown provider error";
+}
+
+/**
+ * A turn that ended on `stopReason: "length"` spent its whole output budget
+ * (often on reasoning alone) and produced no final answer; without a notice it
+ * looks like a hung session. The copy lives in i18n (`chat.truncatedByOutputLimit`).
+ */
+export function isAssistantTruncated(
+  message: AssistantMessage,
+  options: DisplayOptions = {},
+): boolean {
+  return !options.isStreaming && message.stopReason === "length";
+}
+
+/** Text, an image, or a tool call is an answer. Thinking alone is not. */
+export function hasAssistantAnswer(message: AssistantMessage): boolean {
+  return (message.content ?? []).some((block) => {
+    if (block.type === "text") return block.text.trim().length > 0;
+    return block.type === "image" || block.type === "toolCall";
+  });
 }
 
 function isFinalAnswerBlock(block: AssistantContentBlock): boolean {

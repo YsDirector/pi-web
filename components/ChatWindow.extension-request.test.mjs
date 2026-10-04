@@ -39,14 +39,36 @@ test("pins the title head in the header and keeps body newlines", () => {
   assert.match(source, /const \{ head: titleHead, rest: titleRest \} = splitDialogTitle\(request\.title\)/);
   assert.match(source, /import \{ splitDialogTitle \} from "@\/lib\/dialog-title"/);
   const header = dialogSource.slice(dialogSource.indexOf('role="dialog"'), dialogSource.indexOf('{request.method === "confirm"'));
-  // A long title must not push the options and buttons out of view.
-  assert.match(header, /maxHeight: "50%", overflowY: "auto"/);
   assert.match(header, /\{titleHead\}/);
   assert.match(header, /renderDialogTitle\(titleRest\)/);
+  // The dialog's own height is content-driven (only max-height is set), so a percentage
+  // cap on the header never resolves and a non-shrinkable header grows to its full text
+  // height, pushing the option list and the footer past the dialog's overflow edge (#890).
+  // The cap has to be viewport-based and the header has to be allowed to shrink and scroll.
+  assert.match(header, /flexShrink: 1, minHeight: 0,[\s\S]*?maxHeight: "50vh", overflowY: "auto" \}\}>/);
+  assert.doesNotMatch(header, /maxHeight: "50%"/);
+  // Pi's TUI shows the title verbatim, newlines included; the pinned head keeps them too.
+  assert.match(header, /whiteSpace: "pre-wrap", overflowWrap: "anywhere" \}\}>\{titleHead\}/);
 });
 
 test("resets collapse state when a new extension request arrives", () => {
   assert.match(source, /<ExtensionDialog key=\{extensionDialog.id\}/);
   assert.match(source, /<ExtensionCustomPanel key=\{extensionCustomUi.id\}/);
   assert.match(customSource, /if \(!collapsed\) inputRef.current\?\.focus\(\);\s*}, \[collapsed\]\)/);
+});
+
+test("shows how many extension requests wait behind the one on screen", () => {
+  const expandedHeader = dialogSource.slice(dialogSource.indexOf('role="dialog"'), dialogSource.indexOf("{request.method === \"confirm\""));
+  const collapsedButton = dialogSource.slice(dialogSource.indexOf("{collapsed ? ("), dialogSource.indexOf('role="dialog"'));
+  const customCollapsed = customSource.slice(customSource.indexOf("{collapsed ? ("), customSource.indexOf('role="dialog"'));
+  const customExpanded = customSource.slice(customSource.indexOf('role="dialog"'));
+  const waitingSource = source.slice(source.indexOf("function ExtensionWaitingCount"), source.indexOf("function ExtensionDialog("));
+
+  assert.match(source, /<ExtensionDialog key=\{extensionDialog.id\} request=\{extensionDialog\} waitingCount=\{waitingExtensionDialogCount\}/);
+  assert.match(source, /<ExtensionCustomPanel key=\{extensionCustomUi.id\} request=\{extensionCustomUi\} waitingCount=\{waitingExtensionCustomUiCount\}/);
+  assert.match(waitingSource, /if \(count <= 0\) return null;[\s\S]*?t\("chat\.extensionMoreWaiting", \{ count \}\)/);
+  assert.match(expandedHeader, /chat\.extensionRequest"\)\}<\/span>\s+<ExtensionWaitingCount count=\{waitingCount\} \/>\s+\{countdown\}/);
+  assert.match(collapsedButton, /<ExtensionWaitingCount count=\{waitingCount\} \/>\s+\{countdown\}/);
+  assert.match(customCollapsed, /<ExtensionWaitingCount count=\{waitingCount\} \/>\s+<span[^>]*>\s+\{t\("chat\.extensionExpand"\)\}/);
+  assert.match(customExpanded, /chat\.extensionPanel"\)\}<\/div>\s+<div[^>]*>\s+<ExtensionWaitingCount count=\{waitingCount\} \/>/);
 });

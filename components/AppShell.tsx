@@ -10,7 +10,7 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
-import { ProjectTrustDialog } from "./ProjectTrustDialog";
+import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
@@ -33,7 +33,9 @@ import {
   showBrowserNotification,
 } from "@/lib/browser-notifications";
 import { setupPushSubscription } from "@/lib/push-client";
-import { getInitialNavigation } from "@/lib/initial-navigation";
+import { getInitialNavigation, withTabOpen } from "@/lib/initial-navigation";
+import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
+import { mergeCatalogRow } from "./session-catalog-helpers";
 import { rekeyDraft } from "@/lib/draft-store";
 import {
   clearLastOpen,
@@ -53,13 +55,13 @@ import {
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
-import type { ProjectTrustStatus } from "@/lib/api-types";
+import type { McpErrorResponse, ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import type { ToolEntry } from "@/lib/tool-presets";
 import { getSessionFamily } from "@/lib/session-family";
-import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
+import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 type AutoNameStatus =
@@ -78,7 +80,7 @@ function parkedNewSessionDraftKey(cwd: string): string {
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
+  const [initialNavigation, setInitialNavigation] = useState(() => getInitialNavigation(searchParams));
   // Keep the system-theme subscription mounted for the lifetime of the app.
   useTheme();
   const { locale, t: translate } = useI18n();
@@ -122,6 +124,14 @@ export function AppShell() {
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
   const handleSessionsChange = useCallback((sessions: SessionInfo[]) => {
     setSessionCatalog(sessions);
+    // The sidebar hydrates metadata after the selected session has already
+    // mounted. Merge that update into the active session without changing the
+    // ChatWindow key or restarting its history load.
+    setSelectedSession((current) => {
+      if (!current) return current;
+      const refreshed = sessions.find((session) => session.id === current.id);
+      return refreshed ? mergeCatalogRow(current, refreshed) : current;
+    });
   }, []);
   const sessionsWithSelection = useMemo(() => {
     if (!selectedSession) return sessionCatalog;
@@ -166,9 +176,14 @@ export function AppShell() {
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
-  const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
+  const [projectTrustError, setProjectTrustError] = useState<ProjectTrustFailure | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [rightPanelExpanded, setRightPanelExpanded] = useState(false);
+  const rightPanelFullWidth = rightPanelOpen && rightPanelExpanded && !isMobile;
+  useEffect(() => {
+    if (!rightPanelOpen || isMobile) setRightPanelExpanded(false);
+  }, [rightPanelOpen, isMobile]);
   const [mobileToolbarMoreOpen, setMobileToolbarMoreOpen] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
@@ -244,12 +259,14 @@ export function AppShell() {
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
   const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
+  const [branchSwitchLocked, setBranchSwitchLocked] = useState(false);
   const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
   const sessionHasBranches = hasSessionBranches(branchTree);
 
-  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
+  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => {
     setBranchTree(tree);
     setBranchActiveLeafId(activeLeafId);
+    setBranchSwitchLocked(locked);
     branchLeafChangeFnRef.current = onLeafChange;
   }, []);
 
@@ -327,6 +344,10 @@ export function AppShell() {
     }
   }, [hasSubagentSessions]);
 
+  useEffect(() => {
+    if (rightPanelFullWidth) setActiveTopPanel(null);
+  }, [rightPanelFullWidth]);
+
   const toggleTopPanel = useCallback((
     panel: "agents" | "branches" | "system" | "tools" | "session",
     keepMobileToolbarOpen = false,
@@ -363,6 +384,11 @@ export function AppShell() {
     setActiveTopPanel("session");
   }, [isMobile]);
 
+  // The composer opens Settings too: a bare /mcp opens Settings › MCP (useAgentSession).
+  const openSettingsSection = useCallback((section: SettingsSection) => {
+    setSettingsSection(section);
+  }, []);
+
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) {
       setActiveTopPanel(null);
@@ -385,6 +411,11 @@ export function AppShell() {
     }
     setRightPanelOpen((open) => !open);
   }, [isMobile]);
+
+  const handleRightPanelExpandToggle = useCallback(() => {
+    setActiveTopPanel(null);
+    setRightPanelExpanded((expanded) => !expanded);
+  }, []);
 
   useEffect(() => {
     if (!mobileToolbarMoreOpen) return;
@@ -500,6 +531,15 @@ export function AppShell() {
   const activeProjectKeyRef = useRef<string | null>(null);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
+  // sessionStorage is empty during SSR. Applying the tab's remembered session
+  // in the useState initializer made the first client tree differ from the
+  // server HTML (sidebar "select project" vs ""). Restore after mount instead.
+  useLayoutEffect(() => {
+    const next = withTabOpen(initialNavigation, getTabOpen());
+    if (next === initialNavigation) return;
+    setInitialNavigation(next);
+    if (next.sessionId) setInitialSessionRestored(false);
+  }, [initialNavigation]);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
   // Guards the async workspace restore so a slow response from an earlier
@@ -513,13 +553,21 @@ export function AppShell() {
   // Persist every active-session transition, including new and forked sessions
   // that bypass the sidebar selection handler. Transient sessions do not yet
   // carry projectKey, so use the active project identity until hydration.
+  // The workspace memory is shared by every tab; the tab memory keeps this
+  // tab's own session so a reload does not follow another tab's last pick.
+  // New session is a selection too: remember the composer cwd so reload stays
+  // on that UI instead of resurrecting the previous chat.
   useEffect(() => {
-    if (!selectedSession) return;
-    const projectKey = selectedSession.projectKey
-      ?? activeProjectKeyRef.current
-      ?? workspaceKeyOf(selectedSession);
-    setLastOpenSession(projectKey, selectedSession.id);
-  }, [selectedSession]);
+    if (selectedSession) {
+      const projectKey = selectedSession.projectKey
+        ?? activeProjectKeyRef.current
+        ?? workspaceKeyOf(selectedSession);
+      setLastOpenSession(projectKey, selectedSession.id);
+      setTabOpenSession(selectedSession.id);
+      return;
+    }
+    if (newSessionCwd) setTabOpenNewSession(newSessionCwd);
+  }, [newSessionCwd, selectedSession]);
 
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
@@ -549,6 +597,9 @@ export function AppShell() {
         activeNewSessionDraftKeyRef.current = `new:${draftId}:${data.cwd}`;
         setNewSessionCwd(data.cwd);
         setInitialCwdStatus("ready");
+        if (!new URLSearchParams(window.location.search).get("cwd")) {
+          router.replace(`?cwd=${encodeURIComponent(data.cwd)}`, { scroll: false });
+        }
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -557,7 +608,7 @@ export function AppShell() {
       });
 
     return () => controller.abort();
-  }, [initialNavigation]);
+  }, [initialNavigation, router]);
 
   // Restore the workspace's last open session after switching to it. Called
   // from handleCwdChange once the outgoing context has been reset. The session
@@ -567,44 +618,51 @@ export function AppShell() {
     const token = ++workspaceRestoreTokenRef.current;
     const lastOpenSessionId = getLastOpenSession(projectKey);
     if (!lastOpenSessionId) return;
+    const adopt = (d: { sessions: SessionInfo[] } | null) => {
+      if (token !== workspaceRestoreTokenRef.current) return; // stale switch
+      const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
+      if (!s) {
+        // The list loaded but the remembered session is gone — forget it.
+        // When the list itself failed (d === null) keep the memory so a
+        // later switch retries the restore.
+        if (d) clearLastOpen(projectKey);
+        return;
+      }
+      if (workspaceKeyOf(s) !== projectKey) {
+        // Defensive: the remembered session drifted out of this workspace.
+        clearLastOpen(projectKey);
+        return;
+      }
+      // Keep the temporary composer's draft in its cwd, even when the
+      // remembered session belongs to another worktree of this project.
+      const activeDraftKey = activeNewSessionDraftKeyRef.current;
+      if (activeDraftKey) {
+        rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(cwd));
+      }
+      activeNewSessionDraftKeyRef.current = null;
+      // Selecting the session must remount the chat with the session
+      // present: useAgentSession loads content in a mount-only effect, so
+      // the null-session welcome mount from the switch would never load
+      // the restored session's messages.
+      setSelectedSession(s);
+      setSessionKey((k) => k + 1);
+      if (new URLSearchParams(window.location.search).get("session") !== s.id) {
+        router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
+      }
+    };
+    // Fast path: the sidebar already delivered the catalogue — restore
+    // without waiting on a fresh /api/sessions round trip.
+    if (sessionCatalog.length > 0) {
+      adopt({ sessions: sessionCatalog });
+      return;
+    }
     void fetch("/api/sessions")
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
-      .then((d) => {
-        if (token !== workspaceRestoreTokenRef.current) return; // stale switch
-        const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
-        if (!s) {
-          // The list loaded but the remembered session is gone — forget it.
-          // When the list itself failed (d === null) keep the memory so a
-          // later switch retries the restore.
-          if (d) clearLastOpen(projectKey);
-          return;
-        }
-        if (workspaceKeyOf(s) !== projectKey) {
-          // Defensive: the remembered session drifted out of this workspace.
-          clearLastOpen(projectKey);
-          return;
-        }
-        // Keep the temporary composer's draft in its cwd, even when the
-        // remembered session belongs to another worktree of this project.
-        const activeDraftKey = activeNewSessionDraftKeyRef.current;
-        if (activeDraftKey) {
-          rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(cwd));
-        }
-        activeNewSessionDraftKeyRef.current = null;
-        // Selecting the session must remount the chat with the session
-        // present: useAgentSession loads content in a mount-only effect, so
-        // the null-session welcome mount from the switch would never load
-        // the restored session's messages.
-        setSelectedSession(s);
-        setSessionKey((k) => k + 1);
-        if (new URLSearchParams(window.location.search).get("session") !== s.id) {
-          router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
-        }
-      })
+      .then(adopt)
       .catch(() => {
         // Network hiccup: keep the remembered session for a later retry.
       });
-  }, [router]);
+  }, [router, sessionCatalog]);
 
   const handleCwdChange = useCallback((
     cwd: string | null,
@@ -660,6 +718,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
@@ -716,6 +775,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     branchLeafChangeFnRef.current = null;
     setSystemPrompt(null);
     setSystemTools(null);
@@ -728,9 +788,11 @@ export function AppShell() {
       // onCwdChange effect firing after setSelectedCwd in the sidebar
       suppressCwdBumpRef.current = true;
     }
-    // Skip router.replace when restoring from URL — the param is already correct
-    // and calling replace in production Next.js triggers a Suspense remount loop
-    if (!isRestore) {
+    // Skip router.replace when the URL already has this session — calling
+    // replace in production Next.js triggers a Suspense remount loop.
+    // Tab-memory restore lands on `/` and must write `?session=` so reload
+    // and copy-link keep this session.
+    if (!isRestore || new URLSearchParams(window.location.search).get("session") !== session.id) {
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
   }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, router, isMobile, newSessionCwd, selectedSession]);
@@ -746,12 +808,13 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
+    router.replace(`?cwd=${encodeURIComponent(cwd)}`, { scroll: false });
   }, [invalidateWorkspaceRestore, router, isMobile]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
@@ -780,6 +843,13 @@ export function AppShell() {
   }, []);
 
   const handleOpenSession = useCallback(async (sessionId: string) => {
+    // Prefer the catalogue the sidebar already delivered: selecting from it
+    // avoids a full detail round trip just to obtain the SessionInfo.
+    const catalogued = sessionCatalog.find((s) => s.id === sessionId);
+    if (catalogued && !catalogued.transient) {
+      handleSelectSession(catalogued);
+      return;
+    }
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
       const data = await response.json() as { info?: SessionInfo; error?: string };
@@ -788,7 +858,7 @@ export function AppShell() {
     } catch (error) {
       console.error("[pi-web] failed to open session:", error instanceof Error ? error.message : error);
     }
-  }, [handleSelectSession]);
+  }, [handleSelectSession, sessionCatalog]);
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
@@ -950,6 +1020,7 @@ export function AppShell() {
     invalidateWorkspaceRestore();
     setRefreshKey((k) => k + 1);
     if (selectedSession?.id === sessionId) {
+      clearTabOpenSession(sessionId);
       const cwd = selectedSession.cwd;
       const draftId = typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()
@@ -961,26 +1032,29 @@ export function AppShell() {
       setSessionKey((k) => k + 1);
       setBranchTree([]);
       setBranchActiveLeafId(null);
+      setBranchSwitchLocked(false);
       setSystemPrompt(null);
       setSystemTools(null);
       setSystemInfoLoading(false);
       setActiveTopPanel(null);
-      router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
+      router.replace(cwd ? `?cwd=${encodeURIComponent(cwd)}` : (typeof window !== "undefined" ? window.location.pathname : "/"), { scroll: false });
     }
   }, [invalidateWorkspaceRestore, selectedSession, router]);
 
   const handleOpenFile = useCallback((
     filePath: string,
     fileName: string,
-    options?: { sourceSessionId?: string | null; modeHint?: "diff" },
+    options?: { sourceSessionId?: string | null; modeHint?: "diff"; page?: number },
   ) => {
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
+    const page = options?.page;
     const tabId = `file:${filePath}`;
     setFileTabs((prev) => openFileTab(prev, {
       fileName,
       filePath,
       modeHint,
+      page,
       sourceSessionId,
       tabId,
     }));
@@ -990,8 +1064,8 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
-  const handleOpenLinkedFile = useCallback((filePath: string) => {
-    handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
+  const handleOpenLinkedFile = useCallback((filePath: string, page?: number) => {
+    handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
   }, [handleOpenFile, selectedSession?.id]);
 
   const handleOpenTerminal = useCallback((cwd: string) => {
@@ -1057,6 +1131,8 @@ export function AppShell() {
     if (!projectTrustCwd) return;
 
     const controller = new AbortController();
+    // The answer also lists the project's MCP servers (`mcpFile`, `mcpServers`), unused here: the
+    // trust dialog fetches the listing again when it opens, since the file can change in between.
     fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
       signal: controller.signal,
     })
@@ -1082,18 +1158,35 @@ export function AppShell() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: projectTrustCwd }),
       });
-      const data = await response.json() as ProjectTrustStatus & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const data = await response.json() as ProjectTrustStatus & Partial<McpErrorResponse>;
+      if (!response.ok || data.error) {
+        // The dialog translates the reason; the English error is only its diagnostic.
+        setProjectTrustError({ error: data.error ?? `HTTP ${response.status}`, ...(data.reason ? { reason: data.reason } : {}) });
+        return;
+      }
       setProjectTrust(data);
       setProjectTrustDialogOpen(false);
       setModelsRefreshKey((key) => key + 1);
       setSessionKey((key) => key + 1);
     } catch (error) {
-      setProjectTrustError(error instanceof Error ? error.message : String(error));
+      setProjectTrustError({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       setProjectTrustBusy(false);
     }
   }, [projectTrustBusy, projectTrustCwd]);
+
+  // The restricted-mode banner and Settings › MCP's trust notice open the same dialog.
+  const openProjectTrustDialog = useCallback(() => {
+    setProjectTrustError(null);
+    setProjectTrustDialogOpen(true);
+  }, []);
+
+  // Settings › MCP added a project server: `.pi/mcp.json` alone makes a folder require trust, and a
+  // fresh folder was trusted in the same step. Every mounted section reloads in place on the new
+  // status (projectTrustReloadKey); nothing was rebuilt, so the chat needs no new session key.
+  const handleProjectTrustChanged = useCallback((cwd: string, status: ProjectTrustStatus) => {
+    if (cwd === projectTrustCwd) setProjectTrust(status);
+  }, [projectTrustCwd]);
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
@@ -1138,7 +1231,7 @@ export function AppShell() {
           ["models", translate("common.models")],
           ["skills", translate("common.skills")],
         ] as const).map(([section, label]) => {
-          const disabled = section !== "models" && !projectTrustCwd;
+          const disabled = settingsSectionRequiresProject(section) && !projectTrustCwd;
           return (
             <button
               key={section}
@@ -1188,10 +1281,7 @@ export function AppShell() {
     return (
       <button
         type="button"
-        onClick={() => {
-          setProjectTrustError(null);
-          setProjectTrustDialogOpen(true);
-        }}
+        onClick={openProjectTrustDialog}
         title={translate("trust.resourcesNotLoaded")}
         aria-label={translate("trust.resourcesNotLoaded")}
         style={{
@@ -1450,6 +1540,7 @@ export function AppShell() {
             tree={branchTree}
             activeLeafId={branchActiveLeafId}
             onLeafChange={handleBranchLeafChange}
+            locked={branchSwitchLocked}
             inline
             containerRef={topBarRef}
             open={activeTopPanel === "branches"}
@@ -1845,6 +1936,7 @@ export function AppShell() {
       <div
         ref={sidebarResizer.panelRef}
         id="session-sidebar"
+        inert={rightPanelFullWidth}
         className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizer.isResizing ? " sidebar-resizing" : ""}`}
         style={{
           "--sidebar-width": `${sidebarResizer.width}px`,
@@ -1863,6 +1955,7 @@ export function AppShell() {
       {sidebarOpen && (
         <div
           {...sidebarResizer.separatorProps}
+          inert={rightPanelFullWidth}
           aria-controls="session-sidebar"
           className={`panel-resize-handle sidebar-resize-handle${sidebarResizer.isResizing ? " is-resizing" : ""}`}
           data-resize-handle="sidebar"
@@ -1871,7 +1964,7 @@ export function AppShell() {
       )}
 
       {/* Center: chat */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+      <div inert={rightPanelFullWidth} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div ref={topBarRef} style={{ flexShrink: 0, background: "var(--bg-panel)" }}>
         <div style={{ display: "flex", alignItems: "center", position: "relative", borderBottom: "1px solid var(--border)", height: "calc(36px + env(safe-area-inset-top))", paddingTop: "env(safe-area-inset-top)" }}>
@@ -1983,6 +2076,7 @@ export function AppShell() {
               tree={branchTree}
               activeLeafId={branchActiveLeafId}
               onLeafChange={handleBranchLeafChange}
+              locked={branchSwitchLocked}
               inline
               compact
               containerRef={topBarRef}
@@ -2264,6 +2358,7 @@ export function AppShell() {
               onSystemInfoLoaderChange={handleSystemInfoLoaderChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
+              onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
               onOpenSession={handleOpenSession}
@@ -2328,6 +2423,7 @@ export function AppShell() {
       {rightPanelOpen && (
         <div
           {...rightPanelResizer.separatorProps}
+          inert={rightPanelFullWidth}
           aria-controls="file-panel"
           className={`panel-resize-handle right-panel-resize-handle${rightPanelResizer.isResizing ? " is-resizing" : ""}`}
           data-resize-handle="right-panel"
@@ -2339,7 +2435,7 @@ export function AppShell() {
       <div
         ref={rightPanelResizer.panelRef}
         id="file-panel"
-        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizer.isResizing ? " right-panel-resizing" : ""}`}
+        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelFullWidth ? " right-panel-full-width" : ""}${rightPanelResizer.isResizing ? " right-panel-resizing" : ""}`}
         style={{
           "--right-panel-width": `${rightPanelResizer.width}px`,
           display: "flex",
@@ -2366,6 +2462,21 @@ export function AppShell() {
               onCloseTab={handleCloseFileTab}
             />
           </div>
+          <button
+            type="button"
+            className="file-panel-expand-button"
+            onClick={handleRightPanelExpandToggle}
+            aria-controls="file-panel"
+            aria-pressed={rightPanelFullWidth}
+            title={translate(rightPanelFullWidth ? "files.restorePanelWidth" : "files.expandPanel")}
+            aria-label={translate(rightPanelFullWidth ? "files.restorePanelWidth" : "files.expandPanel")}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d={rightPanelFullWidth
+                ? "M9 3v6H3m12-6v6h6M9 21v-6H3m12 6v-6h6M3 3l6 6m12-6-6 6M3 21l6-6m12 6-6-6"
+                : "M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M3 3l6 6m12-6-6 6M3 21l6-6m12 6-6-6"} />
+            </svg>
+          </button>
           <button
             type="button"
             onClick={() => setRightPanelOpen(false)}
@@ -2398,6 +2509,7 @@ export function AppShell() {
               sourceSessionId={activeFileTab.sourceSessionId}
               gitRefreshKey={explorerRefreshKey}
               initialDisplayMode={activeFileTab.initialDisplayMode}
+              initialPage={activeFileTab.page}
               initialState={activeFileTab.viewerState}
               watchEnabled={rightPanelOpen}
               onStateChange={(viewerState) => handleFileViewerStateChange(
@@ -2407,10 +2519,10 @@ export function AppShell() {
               )}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
               onAtMention={handleAtMention}
-              onOpenFile={(filePath) => handleOpenFile(
+              onOpenFile={(filePath, page) => handleOpenFile(
                 filePath,
                 getFileName(filePath),
-                { sourceSessionId: activeFileTab.sourceSessionId },
+                { sourceSessionId: activeFileTab.sourceSessionId, page },
               )}
             />
           ) : !terminalTabs.some((tab) => tab.id === activeFileTabId) ? (
@@ -2444,8 +2556,12 @@ export function AppShell() {
           setModelsRefreshKey((key) => key + 1);
         }}
         onSessionReloaded={() => setSessionKey((key) => key + 1)}
+        projectTrust={projectTrust}
+        onOpenTrustDialog={openProjectTrustDialog}
+        onProjectTrustChanged={handleProjectTrustChanged}
       />
     )}
+    {/* After Settings, so it opens above it (z-index 1100 over 1000) when Settings › MCP asks for it. */}
     {projectTrustDialogOpen && projectTrustCwd && (
       <ProjectTrustDialog
         cwd={projectTrustCwd}
@@ -2455,6 +2571,7 @@ export function AppShell() {
           if (!projectTrustBusy) setProjectTrustDialogOpen(false);
         }}
         onConfirm={() => void handleTrustProject()}
+        onStatus={setProjectTrust}
       />
     )}
     </>
