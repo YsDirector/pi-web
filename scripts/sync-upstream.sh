@@ -39,7 +39,14 @@ cd "$(git rev-parse --show-toplevel)"
 PUSH="${1:-}"
 
 # 0) 前置检查
-if [ -n "$(git status --porcelain)" ]; then
+# 合并进行中（MERGE_HEAD 存在）时允许工作区“脏”：那正是“冲突已解决、准备续跑验证”
+# 的状态。脚本原先无条件拒绝脏工作区，导致它自己打印的
+# “解决后 git add 这些文件，再运行 $0 继续”根本无法执行。
+MERGE_IN_PROGRESS=0
+if [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+  MERGE_IN_PROGRESS=1
+fi
+if [ "$MERGE_IN_PROGRESS" = 0 ] && [ -n "$(git status --porcelain)" ]; then
   echo "✗ 工作区不干净，请先提交或 stash："
   git status --short | head -20
   exit 1
@@ -55,18 +62,25 @@ fi
 git config rerere.enabled true
 
 # 1) fetch + merge
-echo "=== [1/6] fetch upstream ==="
-git fetch upstream
-UPSTREAM_HEAD=$(git rev-parse --short upstream/main)
-FORK_HEAD=$(git rev-parse --short main)
-echo "upstream: $UPSTREAM_HEAD / fork: $FORK_HEAD"
-if git merge-base --is-ancestor upstream/main main; then
-  echo "✓ 本地已包含 upstream/main，无需合并"
-  exit 0
-fi
+if [ "$MERGE_IN_PROGRESS" = 1 ]; then
+  echo "=== [1-2/6] 检测到进行中的合并（MERGE_HEAD），跳过 fetch/merge，直接续跑验证 ==="
+  UPSTREAM_HEAD=$(git rev-parse --short upstream/main)
+  FORK_HEAD=$(git rev-parse --short main)
+  echo "upstream: $UPSTREAM_HEAD / fork: $FORK_HEAD"
+else
+  echo "=== [1/6] fetch upstream ==="
+  git fetch upstream
+  UPSTREAM_HEAD=$(git rev-parse --short upstream/main)
+  FORK_HEAD=$(git rev-parse --short main)
+  echo "upstream: $UPSTREAM_HEAD / fork: $FORK_HEAD"
+  if git merge-base --is-ancestor upstream/main main; then
+    echo "✓ 本地已包含 upstream/main，无需合并"
+    exit 0
+  fi
 
-echo "=== [2/6] merge upstream/main ==="
-git merge upstream/main --no-edit || true
+  echo "=== [2/6] merge upstream/main ==="
+  git merge upstream/main --no-edit || true
+fi
 
 # 2.5) 已知冲突自动处理
 echo "=== [2.5/6] 处理已知冲突 ==="
