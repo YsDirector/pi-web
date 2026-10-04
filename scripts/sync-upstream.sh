@@ -10,11 +10,17 @@
 #   1. 工作区必须干净（有未提交改动会拒绝，先 commit/stash）。
 #   2. git fetch upstream && git merge upstream/main。
 #   3. 已知冲突自动处理：
-#      - components/ChatInput.tsx  → 一律取上游版本（fork 已放弃手机模式，用
-#        上游 isMobile 自动检测；若以后再想自定义此文件，改这里）。
-#      - package.json / package-lock.json → 取上游版本（版本号跟随上游）。
-#      - 其余文件（AppShell/ChatWindow/ExtensionWidgets）依赖 git rerere：
-#        首次合并需手工解决，此后 rerere 自动套用已记忆的解法。
+#      - package.json / package-lock.json → 取上游版本（版本号跟随上游，next 再回钉）。
+#      - public/sw.js → 默认取 fork 版本。fork 改写了上游的缓存策略（static 资源用
+#        networkFirst 取代 cacheFirst，导航加离线 shell 回放，另有会话数据缓存），
+#        但两者共有的超时兜底（fetchWithTimeout / NAVIGATION_TIMEOUT_MS /
+#        ASSET_TIMEOUT_MS）一致。脚本先做一次守卫：只比较上游**新引入**的顶层标识符
+#        （= 上游声明 ∖ (fork HEAD ∪ merge-base)）；命中则**放弃自动化**、留冲突给人工，
+#        避免上游将来新增的 sw 修复被静默丢掉。
+#      - 其余文件依赖 git rerere：首次合并需手工解决，此后 rerere 自动套用记忆的解法。
+#      - 注意：ChatInput.tsx 自 v0.10.0 起不再是特例。fork 当前对它的改动是
+#        「新增 /usage 内置命令 + 同名扩展命令去重」，已能自动合并；旧脚本里
+#        「一律取上游」的规则会静默丢掉这个功能，已删除。
 #   4. next 固定在 16.2.12（16.3.1 在 Node 26 上 SIGBUS 崩溃，见 73db307）。
 #   5. npm install --include=dev（install-scripts 被阻止的包需 approve）。
 #   6. 构建 + 全量测试，通过后提示提交。
@@ -42,7 +48,11 @@ if ! git remote | grep -q '^upstream$'; then
   echo "✗ 缺少 upstream remote（git remote add upstream git@github.com:agegr/pi-web.git）"
   exit 1
 fi
-git config rerere.enabled >/dev/null 2>&1 || git config rerere.enabled true
+# rerere 必须无条件打开。旧写法是
+#   git config rerere.enabled >/dev/null 2>&1 || git config rerere.enabled true
+# 但 .git/config 里若已存在显式的 rerere.enabled=false，`git config` 仍返回退出码 0，
+# `||` 分支永远不会执行——rerere 于是长期处于关闭状态，冲突从不被记忆。
+git config rerere.enabled true
 
 # 1) fetch + merge
 echo "=== [1/6] fetch upstream ==="
@@ -60,11 +70,6 @@ git merge upstream/main --no-edit || true
 
 # 2.5) 已知冲突自动处理
 echo "=== [2.5/6] 处理已知冲突 ==="
-if [ -f components/ChatInput.tsx ] && grep -q "^<<<<<<<" components/ChatInput.tsx; then
-  echo "  ChatInput.tsx → 取上游版本（fork 手机模式已弃用）"
-  git checkout --theirs components/ChatInput.tsx
-  git add components/ChatInput.tsx
-fi
 for f in package.json package-lock.json; do
   if [ -f "$f" ] && grep -q "^<<<<<<<" "$f"; then
     echo "  $f → 取上游版本"
@@ -73,14 +78,69 @@ for f in package.json package-lock.json; do
   fi
 done
 
+# public/sw.js：fork 版本把上游的缓存策略改写过（static 资源用 networkFirst 取代
+# cacheFirst，导航加离线 shell 回放，另有会话数据缓存），所以不能简单说“取 ours”。
+# 守卫规则：只比较上游**新引入**的顶层标识符，即 (上游声明) ∖ (fork HEAD ∪ merge-base)。
+# fork 有意删掉的 cacheFirst 在 merge-base 里已存在，会被正确排除；而一旦上游将来真
+# 新增一个 sw 函数/常量，守卫就会命中并放弃自动化，把冲突留给人工——不会静默丢掉上游的修复。
+if [ -f public/sw.js ] && grep -q "^<<<<<<<" public/sw.js; then
+  SW_DECLS() {
+    grep -oE '^(async )?function [A-Za-z0-9_]+|^const [A-Za-z0-9_]+' "$1" \
+      | sed -E 's/^(async )?function //; s/^const //' | sort -u
+  }
+  SW_TMP=$(mktemp -d)
+  git show ":2:public/sw.js" >"$SW_TMP/ours.js"
+  git show ":3:public/sw.js" >"$SW_TMP/theirs.js"
+  SW_BASE_COMMIT=$(git merge-base HEAD MERGE_HEAD 2>/dev/null || true)
+  if [ -n "$SW_BASE_COMMIT" ] && git cat-file -e "$SW_BASE_COMMIT:public/sw.js" 2>/dev/null; then
+    git show "$SW_BASE_COMMIT:public/sw.js" >"$SW_TMP/base.js"
+  else
+    : >"$SW_TMP/base.js"
+  fi
+  SW_NEW_DECLS=$(comm -13 \
+    <(cat <(SW_DECLS "$SW_TMP/ours.js") <(SW_DECLS "$SW_TMP/base.js") | sort -u) \
+    <(SW_DECLS "$SW_TMP/theirs.js"))
+  rm -rf "$SW_TMP"
+  if [ -n "$SW_NEW_DECLS" ]; then
+    echo "  ⚠ 上游 public/sw.js 新引入了 fork 版本没有的顶层标识符，放弃自动处理："
+    echo "$SW_NEW_DECLS" | sed 's/^/      /'
+    echo "    请人工确认上游新增的 sw 特性，并入 fork 的离线 shell/数据缓存版本。"
+  else
+    echo "  public/sw.js → 取 fork 版本（上游无新增顶层标识符）"
+    git checkout --ours public/sw.js
+    git add public/sw.js
+  fi
+fi
+
 REMAINING=$(git diff --name-only --diff-filter=U || true)
 if [ -n "$REMAINING" ]; then
   echo "⚠  剩余冲突需要手工解决（rerere 会自动套用已记忆解法）："
   echo "$REMAINING"
-  echo "   AppShell.tsx:     保留 TodoModal 接线（import/state/按钮/TodoModal 渲染）"
-  echo "   ChatWindow.tsx:   保留 batch-ask/secret/弹窗增强（parseBatchAskEnvelope+ExtensionDialog）"
-  echo "   ExtensionWidgets: 保留 HIDDEN_WIDGET_KEYS 过滤"
-  echo "   解决后 git add 这些文件，再运行 $0 继续"
+  cat <<'GUIDE'
+  已知解法（v0.10.0 基线；完整预案见 ~/dev/pi-web-v0.10.0-merge-plan.md §2）：
+    components/ChatWindow.tsx
+        import 取上游 phaseLabel，追加 fork 的 splitDialogTitle / renderDialogTitle（删 AgentPhase）
+        ExtensionWaitingCount 取上游（新功能 “+N more”）
+        对话框 header 容器取上游（flexShrink:1 / minHeight:0 / maxHeight:"50vh"），
+        标题保留 fork 的 {titleHead}，补 whiteSpace:"pre-wrap" / overflowWrap:"anywhere"
+    components/MessageView.tsx
+        import 取并集：fork 的 BACKGROUND_JOB_CUSTOM_TYPE / usageQuotaPct
+        + 上游的 apply-patch / tool-call-expansion / hasAssistantAnswer / isAssistantTruncated
+    hooks/useAgentSession.ts
+        action 联合类型取三值并集：openSessionStats | openSettings | openUsageDashboard
+        通知抑制分支取上游的 `else if (!result.action)`
+    lib/message-display.ts
+        三个 customType 条件取并集；必须保留
+        `message.customType === "compaction" || message.customType === BACKGROUND_JOB_CUSTOM_TYPE`
+        那一行的原有单行写法——components/BackgroundJobMessage.test.mjs 用源码正则断言它
+    public/sw.test.mjs
+        fork 的 11 个测试 ∪ 上游的 3 个超时测试
+        （并带上游的 installOfflineStub / installHungNetwork / flushMicrotasks 辅助函数）
+    components/ChatWindow.extension-request.test.mjs
+        保留 splitDialogTitle / renderDialogTitle / {titleHead} 断言；
+        布局断言从 maxHeight:"50%" 改为 flexShrink:1 + minHeight:0 + maxHeight:"50vh"
+  解决后 git add 这些文件，再运行 $0 继续
+GUIDE
   exit 1
 fi
 
