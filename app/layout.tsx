@@ -5,6 +5,8 @@ import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import "katex/dist/katex.min.css";
 import "./globals.css";
 import "./settings.css";
+import "./sidebar.css";
+import "./sidebar-menu.css";
 
 // 用系统本地 Noto Sans Mono 替代 next/font/google（离线/网络不稳时构建不依赖外网）
 const notoSansMono = localFont({
