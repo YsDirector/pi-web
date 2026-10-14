@@ -10,7 +10,6 @@ import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { BACKGROUND_JOB_CUSTOM_TYPE, getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantTruncated, isEmptyThinkingBlock } from "@/lib/message-display";
-import { usageQuotaPct } from "@/lib/opencode-quota";
 import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
 import { applyPatchPreviewToFiles, applyPatchResultHasFailures, extractApplyPatchPaths, getApplyPatchInputText, parseApplyPatchInput } from "@/lib/apply-patch";
 import { isApplyPatchToolName, isEditToolName, isWriteToolName } from "@/lib/tool-names";
@@ -939,7 +938,7 @@ function AssistantMessageView({
       }}>
         {message.usage && !isStreaming && (
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            <UsageLine usage={message.usage} model={message.model} provider={message.provider} timestamp={message.timestamp} />
+            {formatUsage(message.usage)}
           </div>
         )}
         {textContent && !isStreaming && (
@@ -2027,40 +2026,20 @@ function getToolPreview(block: ToolCallContent): string {
   return String(first).slice(0, 120);
 }
 
-function formatUsageLine(usage: {
+function formatUsage(usage: {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
   cost: { total: number };
-}, pct: number | null): string {
+}): string {
   const parts = [];
   if (usage.input) parts.push(`${usage.input.toLocaleString()} in`);
   if (usage.output) parts.push(`${usage.output.toLocaleString()} out`);
   if (usage.cacheRead) parts.push(`${usage.cacheRead.toLocaleString()} cache R`);
   if (usage.cacheWrite) parts.push(`${usage.cacheWrite.toLocaleString()} cache W`);
   if (usage.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
-  // 月额度消耗百分比（含模型倍率 + 高峰翻倍）：pct = cost × rate / 渠道月额度
-  if (pct !== null) parts.push(`${pct.toFixed(3)}%`);
   return parts.join(" · ");
-}
-
-/** 消息行用量 + 月额度百分比（异步查 /api/usage/meta，查表后追加 pct）。 */
-function UsageLine({ usage, model, provider, timestamp }: {
-  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } };
-  model?: string;
-  provider?: string;
-  timestamp?: number;
-}) {
-  const [pct, setPct] = useState<number | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void usageQuotaPct(provider, model, usage.cost?.total, timestamp).then((v) => {
-      if (!cancelled) setPct(v);
-    });
-    return () => { cancelled = true; };
-  }, [provider, model, usage, timestamp]);
-  return <>{formatUsageLine(usage, pct)}</>;
 }
 
 function BashExecutionView({ message, sessionId }: { message: BashExecutionMessage; sessionId?: string }) {

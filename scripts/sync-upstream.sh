@@ -18,18 +18,15 @@
 #        （= 上游声明 ∖ (fork HEAD ∪ merge-base)）；命中则**放弃自动化**、留冲突给人工，
 #        避免上游将来新增的 sw 修复被静默丢掉。
 #      - 其余文件依赖 git rerere：首次合并需手工解决，此后 rerere 自动套用记忆的解法。
-#      - 注意：ChatInput.tsx 自 v0.10.0 起不再是特例。fork 当前对它的改动是
-#        「新增 /usage 内置命令 + 同名扩展命令去重」，已能自动合并；旧脚本里
-#        「一律取上游」的规则会静默丢掉这个功能，已删除。
+#      - ChatInput.tsx 不再有 fork 专属的 slash-command 逻辑，跟随上游版本即可。
 #   4. next 固定在 16.2.12（16.3.1 在 Node 26 上 SIGBUS 崩溃，见 73db307）。
 #   5. npm install --include=dev（install-scripts 被阻止的包需 approve）。
 #   6. 构建 + 全量测试，通过后提示提交。
 #
 # fork 独有功能（合并时保留）：
-#   - TodoModal + /api/sessions/[id]/todos（依赖 agent 侧 pi-deck-todo 扩展）
-#   - __piDeckBatchAsk__ 批量问卷弹窗（ask-question 扩展的 envelope 协议）
+#   - bash-bg 后台任务回执卡片
 #   - ExtensionDialog secret 密码输入、超时倒计时、代码块高亮
-#   - ExtensionWidgets 隐藏 pi-deck-todo 悬浮窗（与 TodoModal 重复）
+#   - 离线 shell/会话缓存与永不黑屏的 PWA fallback
 #   - 备份：backup/custom-features-v0.8.8 分支 + ~/.pi/agent/patches/pi-web-custom-backup/
 # ============================================================================
 
@@ -138,21 +135,18 @@ if [ -n "$REMAINING" ]; then
         对话框 header 容器取上游（flexShrink:1 / minHeight:0 / maxHeight:"50vh"），
         标题保留 fork 的 {titleHead}，补 whiteSpace:"pre-wrap" / overflowWrap:"anywhere"
     components/MessageView.tsx
-        import 取并集：fork 的 BACKGROUND_JOB_CUSTOM_TYPE / usageQuotaPct
+        import 取并集：fork 的 BACKGROUND_JOB_CUSTOM_TYPE
         + 上游的 apply-patch / tool-call-expansion / hasAssistantAnswer / isAssistantTruncated
     hooks/useAgentSession.ts
-        action 联合类型取三值并集：openSessionStats | openSettings | openUsageDashboard
+        action 联合类型取上游的 openSessionStats | openSettings
         通知抑制分支取上游的 `else if (!result.action)`
     lib/message-display.ts
         三个 customType 条件取并集；必须保留
         `message.customType === "compaction" || message.customType === BACKGROUND_JOB_CUSTOM_TYPE`
         那一行的原有单行写法——components/BackgroundJobMessage.test.mjs 用源码正则断言它
     public/sw.test.mjs
-        fork 的 11 个测试 ∪ 上游的 3 个超时测试
-        （并带上游的 installOfflineStub / installHungNetwork / flushMicrotasks 辅助函数）
-    components/ChatWindow.extension-request.test.mjs
-        保留 splitDialogTitle / renderDialogTitle / {titleHead} 断言；
-        布局断言从 maxHeight:"50%" 改为 flexShrink:1 + minHeight:0 + maxHeight:"50vh"
+        保留 fork 的 shell/会话缓存测试；static 资源继续使用 fork 的 networkFirst，
+        不直接套用上游 cacheFirst 测试
   解决后 git add 这些文件，再运行 $0 继续
 GUIDE
   exit 1

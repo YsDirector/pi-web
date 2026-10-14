@@ -163,7 +163,7 @@ export interface SlashCommandInfo {
 
 export type BuiltinSlashCommandResult =
   | { handled: false }
-  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openSettings" | "openUsageDashboard" };
+  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openSettings" };
 
 /** How a run ended, for the completion sound and notifications. */
 export interface AgentEndInfo {
@@ -2255,18 +2255,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const completed = complete({ handled: true, message: "Cloned current session branch" });
           onSessionForked?.(result.newSessionId);
           return completed;
-        }
-
-        case "usage": {
-          // 无参：打开用量看板独立页面（不把命令发给 agent）
-          // 带参（如 /usage add <会话ID>）：交给 agent 执行（usage-tracker 扩展处理）
-          if (!args) {
-            if (typeof window !== "undefined") {
-              window.open("/usage", "_blank", "noopener,noreferrer");
-            }
-            return complete({ handled: true, action: "openUsageDashboard" });
-          }
-          return { handled: false };
         }
 
         default:

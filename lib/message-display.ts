@@ -28,8 +28,7 @@ export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; cus
   // (a follow-up that triggers a turn). Other custom messages stay inside the turn.
   return message.role === "user"
     || (message.role === "custom" && !isHiddenCustomMessage(message) && (
-      message.customType === "compaction"
-      || message.customType === BACKGROUND_JOB_CUSTOM_TYPE
+      message.customType === "compaction" || message.customType === BACKGROUND_JOB_CUSTOM_TYPE
       || message.customType === "pi-web:subagent-notification"
       || message.customType === "subagent-notification"
     ));
