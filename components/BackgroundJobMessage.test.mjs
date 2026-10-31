@@ -12,7 +12,7 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { BackgroundJobMessageView } = await jiti.import("./BackgroundJobMessage.tsx");
-const { I18nProvider } = await jiti.import("@/hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 const React = await jiti.import("react");
 

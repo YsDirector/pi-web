@@ -174,6 +174,10 @@
   background: #0891b2;
 }
 
+.session-tree-pinned-dot.is-awaiting {
+  background: #d97706;
+}
+
 /* Session row: title, branch, time; actions take the time's place on
    hover. Hover and selection are a rounded box inset from the sidebar's
    edges, never a full-width band. The title starts in the text column,
@@ -540,9 +544,9 @@ a.session-tree-main {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 
-/* While a group is dragged: its block dimmed in place, the drop line on the
-   edge between two groups (mid-spacer next to the pinned section or the
-   footer), and a ghost with the project's name next to the pointer, placed
+/* While a group is dragged: its block dimmed in place, the drop line in the
+   middle of the spacer it marks (between two groups, next to the pinned
+   section or the footer), and a ghost with the project's name next to the pointer, placed
    clear of the line (hooks/useGroupDrag.ts). */
 .session-tree-drag-source {
   position: absolute;
@@ -654,6 +658,7 @@ a.session-tree-main {
 }
 
 .session-tree-summary-running,
+.session-tree-summary-awaiting,
 .session-tree-summary-unread {
   display: inline-flex;
   align-items: center;
@@ -670,6 +675,10 @@ a.session-tree-main {
   height: 6px;
   border-radius: 50%;
   background: #0891b2;
+}
+
+.session-tree-summary-dot.is-awaiting {
+  background: #d97706;
 }
 
 .session-tree-group-actions {
@@ -810,37 +819,20 @@ a.session-tree-main {
   flex: none;
 }
 
-/* Archive view: one header per project above its archived sessions, a
-   project's name as the main tree's headers show it, in the text column (it
-   folds nothing, so no chevron). As tall as a group's header, but no spacer
-   row parts the projects, so the name sits at the bottom of its row, near
-   its own sessions, at any height (a phone's 44px too). */
-.session-tree-archive-group {
-  align-items: flex-end;
-  gap: 5px;
-  padding: 0 8px 3px calc(var(--session-tree-inset-left) + 20px);
-  color: var(--text-muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.session-tree-archive-group-name {
-  min-width: 0;
-  overflow: hidden;
-  font-weight: 600;
-  text-overflow: ellipsis;
-}
-
+/* Archive view: one header per project above its archived sessions, a main
+   group's header (chevron, name, ⋯ on hover) that folds its rows, with the
+   count after the name in the meta color, shown folded or not. */
 .session-tree-archive-group-count {
   flex: none;
+  margin-left: 2px;
   color: var(--text-dim);
+  font-weight: 400;
 }
 
 /* Phone layout: 44px rows, a step larger type for titles and project names,
    ⋯ and the group buttons always shown, no archive quick button. */
 .session-tree.is-mobile .session-tree-title,
-.session-tree.is-mobile .session-tree-group-toggle,
-.session-tree.is-mobile .session-tree-archive-group {
+.session-tree.is-mobile .session-tree-group-toggle {
   font-size: 13px;
 }
 
@@ -1120,6 +1112,7 @@ a.session-tree-main {
 .sidebar-search-toggle:focus-visible,
 .sidebar-tab:focus-visible,
 .sidebar-archive-back:focus-visible,
+.sidebar-archive-menu-button:focus-visible,
 .sidebar-tool-button:focus-visible,
 .sidebar-files-section-toggle:focus-visible {
   outline: 2px solid var(--accent);
@@ -1429,6 +1422,28 @@ a.session-tree-main {
 .sidebar-archive-count {
   color: var(--text-dim);
   font-weight: 400;
+}
+
+/* The archive's ⋯ at the bar's right end: fold, Restore all, Delete…. */
+.sidebar-archive-menu-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.sidebar-archive-menu-button:hover,
+.sidebar-archive-menu-button.is-active {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .sidebar-icon-back {
