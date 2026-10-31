@@ -212,17 +212,47 @@ if [ "${2:-}" = "--deploy" ]; then
   rsync -a --delete node_modules/ "$DEPLOY_DIR/node_modules/"
   # 内嵌宿主 secret 透传补丁（npm 原版覆盖 node_modules 后必须重打，否则密码框静默变明文）
   PI_WEB_ROOT="$DEPLOY_DIR" ~/.pi/agent/patches/pi-web-secret-input/apply.sh 2>&1 | tail -2 || echo "⚠ secret 补丁失败，检查 ~/.pi/agent/patches/pi-web-secret-input/"
-  # 备份只留最近 1 份
+  # 备份只留最近 1 份——**必须放在重启之前**：重启会连本脚本一起杀掉（见下），
+  # 放在重启之后就执行不到，旧备份会一路攒到 10GB+（v0.13.0 部署时实测攒了 4 组）。
   ls -dt "$DEPLOY_DIR"/.next.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
   ls -dt "$DEPLOY_DIR"/node_modules.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
-  systemctl --user restart pi-web
-  sleep 5
+
+  # 重启 + 健康检查不能在本脚本里跑。pi-web.service 是 KillMode=control-group，
+  # `systemctl --user restart` 会对整个 cgroup 发 SIGTERM，本脚本是它的子孙进程所以
+  # 一起死——历史实现用 `setsid` 也没用，setsid 只换 session/process group，不换 cgroup。
+  # 只有**不带 --scope** 的瞬态 service 是目标单元的兄弟而非子孙，能活过重启。
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  UNIT="pi-web-deploy-$TS"
+  HEALTH_SCRIPT="/tmp/pi-web-deploy-health-$TS.sh"
+  cat > "$HEALTH_SCRIPT" <<HEALTH
+#!/usr/bin/env bash
+# 由 sync-upstream.sh 的 --deploy 生成，跑在 pi-web.service 之外的瞬态单元里。
+export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}"
+DEPLOY_DIR="$DEPLOY_DIR"
+TS="$TS"
+systemctl --user restart pi-web
+for _ in \$(seq 1 40); do
   if curl -sf -o /dev/null http://127.0.0.1:30141/; then
-    echo "✓ 部署完成，服务健康：http://127.0.0.1:30141（旧备份保留一份：.next.old-$TS）"
-  else
-    echo "✗ 服务未响应，请检查：systemctl --user status pi-web"
-    exit 1
+    echo "✓ 部署完成，服务健康：http://127.0.0.1:30141（备份保留一份：.next.old-\$TS）"
+    echo "  pi-web \$(node -p "require('\$DEPLOY_DIR/package.json').version" 2>/dev/null)"
+    echo "  next   \$(node -p "require('\$DEPLOY_DIR/node_modules/next/package.json').version" 2>/dev/null)"
+    echo "  pi SDK \$(node -p "require('\$DEPLOY_DIR/node_modules/@earendil-works/pi-coding-agent/package.json').version" 2>/dev/null)"
+    exit 0
   fi
+  sleep 2
+done
+echo "✗ 服务未响应，请检查：systemctl --user status pi-web"
+echo "  回滚：mv \$DEPLOY_DIR/.next.old-\$TS \$DEPLOY_DIR/.next; mv \$DEPLOY_DIR/node_modules.old-\$TS \$DEPLOY_DIR/node_modules; systemctl --user restart pi-web"
+exit 1
+HEALTH
+  chmod +x "$HEALTH_SCRIPT"
+  echo "  重启由瞬态单元 $UNIT 执行（本脚本的 cgroup 会被一起杀掉，重启后的步骤不能在这里跑）"
+  systemd-run --user --collect --unit="$UNIT" \
+    --description="pi-web deploy restart + health check ($TS)" \
+    -- bash "$HEALTH_SCRIPT" || { echo "✗ systemd-run 启动瞬态单元失败"; exit 1; }
+  echo "  服务将在数秒后重启，本脚本随之结束——这是正常的。"
+  echo "  查看结果：journalctl --user -u $UNIT -n 20 --no-pager"
+  exit 0
 fi
 
 if [ "$PUSH" = "--push" ]; then
