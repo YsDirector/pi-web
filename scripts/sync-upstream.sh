@@ -10,7 +10,9 @@
 #   1. 工作区必须干净（有未提交改动会拒绝，先 commit/stash）。
 #   2. git fetch upstream && git merge upstream/main。
 #   3. 已知冲突自动处理：
-#      - package.json / package-lock.json → 取上游版本（版本号跟随上游，next 再回钉）。
+#      - package-lock.json → 整份取上游，随后由 npm install 按 package.json 重生成。
+#      - package.json → **不能**整份取上游：fork 有上游没有的顶层键（allowScripts）。
+#        改为「以上游为底 + 补回 fork 独有的顶层键」的逐键合并。
 #      - public/sw.js → 默认取 fork 版本。fork 改写了上游的缓存策略（static 资源用
 #        networkFirst 取代 cacheFirst，导航加离线 shell 回放，另有会话数据缓存），
 #        但两者共有的超时兜底（fetchWithTimeout / NAVIGATION_TIMEOUT_MS /
@@ -19,14 +21,18 @@
 #        避免上游将来新增的 sw 修复被静默丢掉。
 #      - 其余文件依赖 git rerere：首次合并需手工解决，此后 rerere 自动套用记忆的解法。
 #      - ChatInput.tsx 不再有 fork 专属的 slash-command 逻辑，跟随上游版本即可。
-#   4. next 固定在 16.2.12（16.3.1 在 Node 26 上 SIGBUS 崩溃，见 73db307）。
+#   4. next 跟随上游，**不再钉版本**（v0.15.0 起）：16.2.12 的钉是为规避 16.3.1 在
+#      Node 26 上的 SIGBUS（退出码 135，见 73db307/d7c4c50）。2026-11-04 实测
+#      next 16.4.4 + Node 26.12.1：`next build --webpack` EXIT=0，无 SIGBUS。
+#      若日后某个小版本回归该崩溃，把下面「版本变化丢 .next」的逻辑配上一次钉版本即可。
 #   5. npm install --include=dev（install-scripts 被阻止的包需 approve）。
 #   6. 构建 + 全量测试，通过后提示提交。
 #
 # fork 独有功能（合并时保留）：
-#   - bash-bg 后台任务回执卡片
-#   - ExtensionDialog secret 密码输入、超时倒计时、代码块高亮
-#   - 离线 shell/会话缓存与永不黑屏的 PWA fallback
+#   - bash-bg 后台任务回执卡片（components/BackgroundJobMessage.* + MessageView 接线）
+#   - ExtensionDialog secret 密码输入、超时到点自动取消、标题首行钉住 + 代码围栏高亮
+#   - 离线 shell/会话数据缓存与永不黑屏的 PWA fallback
+#   - 扩展状态栏单行不换行 + 横向滚动；本地 Noto Sans Mono（构建不依赖外网）
 #   - 备份：backup/custom-features-v0.8.8 分支 + ~/.pi/agent/patches/pi-web-custom-backup/
 # ============================================================================
 
@@ -81,13 +87,37 @@ fi
 
 # 2.5) 已知冲突自动处理
 echo "=== [2.5/6] 处理已知冲突 ==="
-for f in package.json package-lock.json; do
-  if [ -f "$f" ] && grep -q "^<<<<<<<" "$f"; then
-    echo "  $f → 取上游版本"
-    git checkout --theirs "$f"
-    git add "$f"
-  fi
-done
+# package-lock.json：整份取上游，随后 npm install 会按 package.json（含 next 的实际版本）
+# 重生成整份锁；留着 fork 侧旧的 next/swc/sharp 锁条目反而会让 install 多下载一遍。
+if [ -f package-lock.json ] && grep -q "^<<<<<<<" package-lock.json; then
+  echo "  package-lock.json → 取上游版本（随后 npm install 重生成）"
+  git checkout --theirs package-lock.json
+  git add package-lock.json
+fi
+
+# package.json：**不能**整份取上游。fork 有上游没有的顶层键（`allowScripts`：npm 11+ 的
+# install-scripts 白名单），旧写法 `git checkout --theirs package.json` 会把它一起丢掉，
+# 随后 npm install 就会因 postinstall 被拦而装不好 node-pty/sharp。
+# 两个 stage 的 blob 都是干净 JSON，所以以上游为底、把「上游没有的 fork 顶层键」补回去即可。
+if [ -f package.json ] && grep -q "^<<<<<<<" package.json; then
+  echo "  package.json → 以上游为底 + 补回 fork 独有的顶层键"
+  PKG_TMP=$(mktemp -d)
+  git show ":2:package.json" > "$PKG_TMP/ours.json"
+  git show ":3:package.json" > "$PKG_TMP/theirs.json"
+  node - "$PKG_TMP/ours.json" "$PKG_TMP/theirs.json" "$PKG_TMP/merged.json" <<'NODE'
+const fs = require("fs");
+const [oursPath, theirsPath, outPath] = process.argv.slice(2);
+const ours = JSON.parse(fs.readFileSync(oursPath, "utf8"));
+const merged = JSON.parse(fs.readFileSync(theirsPath, "utf8"));
+for (const [key, value] of Object.entries(ours)) {
+  if (!(key in merged)) merged[key] = value; // fork 独有的顶层键（allowScripts 等）
+}
+fs.writeFileSync(outPath, JSON.stringify(merged, null, 2) + "\n");
+NODE
+  cp "$PKG_TMP/merged.json" package.json
+  rm -rf "$PKG_TMP"
+  git add package.json
+fi
 
 # public/sw.js：fork 版本把上游的缓存策略改写过（static 资源用 networkFirst 取代
 # cacheFirst，导航加离线 shell 回放，另有会话数据缓存），所以不能简单说“取 ours”。
@@ -128,40 +158,40 @@ if [ -n "$REMAINING" ]; then
   echo "⚠  剩余冲突需要手工解决（rerere 会自动套用已记忆解法）："
   echo "$REMAINING"
   cat <<'GUIDE'
-  已知解法（v0.10.0 基线；完整预案见 ~/dev/pi-web-v0.10.0-merge-plan.md §2）：
-    components/ChatWindow.tsx
-        import 取上游 phaseLabel，追加 fork 的 splitDialogTitle / renderDialogTitle（删 AgentPhase）
-        ExtensionWaitingCount 取上游（新功能 “+N more”）
-        对话框 header 容器取上游（flexShrink:1 / minHeight:0 / maxHeight:"50vh"），
-        标题保留 fork 的 {titleHead}，补 whiteSpace:"pre-wrap" / overflowWrap:"anywhere"
-    components/MessageView.tsx
-        import 取并集：fork 的 BACKGROUND_JOB_CUSTOM_TYPE
-        + 上游的 apply-patch / tool-call-expansion / hasAssistantAnswer / isAssistantTruncated
-    hooks/useAgentSession.ts
-        action 联合类型取上游的 openSessionStats | openSettings
-        通知抑制分支取上游的 `else if (!result.action)`
-    lib/message-display.ts
-        三个 customType 条件取并集；必须保留
-        `message.customType === "compaction" || message.customType === BACKGROUND_JOB_CUSTOM_TYPE`
-        那一行的原有单行写法——components/BackgroundJobMessage.test.mjs 用源码正则断言它
-    public/sw.test.mjs
-        保留 fork 的 shell/会话缓存测试；static 资源继续使用 fork 的 networkFirst，
-        不直接套用上游 cacheFirst 测试
+  已知解法（v0.15.0 基线；完整预案见 ~/dev/pi-web-v0.15.0-merge-plan.md §2）：
+    components/ChatWindow.tsx   —— 三处冲突都在扩展对话框的标题渲染
+        上游 v0.14 起把标题统一成 stripAnsi(request.title)，fork 是 splitDialogTitle()
+        切出来的 {titleHead}（首行钉在表头）+ titleRest（正文渲染 ```sh 围栏）。
+        解法：三处一律取 fork 的 {titleHead} / aria-label={titleHead}（连 aria-modal="true"），
+        并把切分入口改成
+            const { head: titleHead, rest: titleRest } = splitDialogTitle(stripAnsi(request.title));
+        否则带 ANSI 的标题会显示原始转义序列。lib/dialog-title.ts 保持纯函数，不要在那里 strip。
+    package.json
+        next 跟随上游（不再钉 16.2.12）；保留 fork 的 allowScripts 块
+    package-lock.json
+        整份取上游，随后 npm install 重生成（会与上游锁逐字节相同）
+    public/sw.js / public/sw.test.mjs
+        通常能自动合并（上游 v0.15.0 新增 RECENT_NOTIFICATION_MS / showPushNotification /
+        hasRecentNotification 三个顶层标识符，与 fork 的离线缓存区域不重叠）。
+        若 sw.js 真的冲突：保留 fork 的 SHELL_CACHE/DATA_CACHE/networkFirst/离线 shell，
+        并把上游新增的 push 去重函数一并并入。
+    components/ExtensionStatusBar.test.mjs
+        上游改成 ANSI 调色板断言（class="ansi-green-fg"），fork 是单行不换行 CSS 断言，两段共存。
+    app/layout.tsx / app/globals.css
+        上游改 manifest link / --ansi-* 调色板，fork 改本地字体 / 状态栏单行，彼此不重叠。
   解决后 git add 这些文件，再运行 $0 继续
 GUIDE
   exit 1
 fi
 
-# 3) 依赖 + 版本固定
-echo "=== [3/6] 依赖安装（next 固定 16.2.12，Node 26 SIGBUS 规避）==="
+# 3) 依赖 + 版本
+# next 从 v0.15.0 起跟随上游（不再钉 16.2.12）。前缀记录的 PREV_NEXT 只用于下面
+# 「版本变化 → 丢弃陈旧 .next」的判定。
+echo "=== [3/6] 依赖安装 ==="
 # 记录安装前的 next 版本：版本变化时必须丢弃 .next，否则陈旧生成物会毒害后续步骤
 PREV_NEXT=$(node -p "require('./node_modules/next/package.json').version" 2>/dev/null || echo none)
-# 确保 next 版本固定，避免 install 升级回 16.3.1
-# 注意：上游 package.json 用精确版本（"16.3.1"），fork 曾经用 caret 范围（"^16.3.1"），
-# 两种形态都要能改写——旧正则只匹配 caret 形式，升级后会静默失效导致 SIGBUS 复发。
-grep -q '"next": "16.2.12"' package.json || sed -i -E 's/("next":[[:space:]]*)"[~^]?[0-9][0-9.]*"/\1"16.2.12"/' package.json
-grep -q '"next": "16.2.12"' package.json || { echo "✗ next 固定 16.2.12 失败，检查 package.json"; exit 1; }
-timeout 600 npm install --no-audit --no-fund --include=dev || {
+timeout 600 npm install --no-audit --no-fund --include=dev --prefer-offline \
+  --fetch-retries=20 --fetch-retry-maxtimeout=180000 --fetch-timeout=1800000 || {
   echo "  npm install 后 install-scripts 被阻止的包：npm install-scripts ls / approve"
   exit 1
 }
@@ -187,7 +217,7 @@ rm -rf .next/types .next/dev/types
 echo "=== [4/6] tsc --noEmit ==="
 npx tsc --noEmit || { echo "✗ 类型错误"; exit 1; }
 
-# 5) 构建（next 16.2.12；unset TURBOPACK —— 桌面环境该变量与 --webpack 冲突会静默退出）
+# 5) 构建（next 跟随上游；unset TURBOPACK —— 桌面环境该变量与 --webpack 冲突会静默退出）
 echo "=== [5/6] next build --webpack ==="
 timeout 600 env -u TURBOPACK npx next build --webpack || { echo "✗ 构建失败"; exit 1; }
 
