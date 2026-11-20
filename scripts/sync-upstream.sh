@@ -3,8 +3,10 @@
 # sync-upstream.sh — 把上游 agegr/pi-web 的新版本合并进 fork，尽量自动化。
 #
 # 用法：
-#   ./scripts/sync-upstream.sh          # fetch + merge + build + test
-#   ./scripts/sync-upstream.sh --push   # 合并验证通过后提交并推送 origin
+#   ./scripts/sync-upstream.sh               # fetch + merge + build + test
+#   ./scripts/sync-upstream.sh --push        # 合并验证通过后提交并推送 origin
+#   ./scripts/sync-upstream.sh --deploy      # 合并验证通过后部署（已含上游时=纯部署）
+#   ./scripts/sync-upstream.sh --deploy-only # 不 fetch/merge/验证，直接部署当前 main 的构建
 #
 # 工作原理：
 #   1. 工作区必须干净（有未提交改动会拒绝，先 commit/stash）。
@@ -29,7 +31,6 @@
 #   6. 构建 + 全量测试，通过后提示提交。两条**环境性**失败（lib/plantuml.test.mjs、
 #      lib/rpc-manager-chat-only.integration.test.mjs）按文件名放过，其余任何失败照旧中止；
 #      见步骤 6 的 KNOWN_ENV_FAILURES 注释。
-#      若日后某个小版本回归该崩溃，把下面「版本变化丢 .next」的逻辑配上一次钉版本即可。
 #
 # fork 独有功能（合并时保留）：
 #   - bash-bg 后台任务回执卡片（components/BackgroundJobMessage.* + MessageView 接线）
@@ -42,7 +43,88 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-PUSH="${1:-}"
+PUSH=""
+DEPLOY=""
+DEPLOY_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --push) PUSH=--push ;;
+    --deploy) DEPLOY=--deploy ;;
+    --deploy-only) DEPLOY=--deploy; DEPLOY_ONLY=1 ;;
+    *) echo "✗ 未知参数：$arg（可用：--push / --deploy / --deploy-only）"; exit 2 ;;
+  esac
+done
+
+# 7) 部署：把当前工作树的构建同步到安装目录并重启服务。
+#    抽成函数是因为它既服务于「合并验证通过后部署」，也服务于「已含上游 / --deploy-only
+#    时纯部署」——早先这段是行内 if，一旦 main 已包含上游，脚本在第一步就 exit 0 了，
+#    --deploy 会静默变成空操作（2026-11-20 实测确认）。
+#    ！函数体故意**不缩进**：里面的 heredoc（<<HEALTH）以行首 HEALTH 结束，整体缩进会让它
+#    永远结束不了。
+#    备份只留最近 1 份（避免 .next.old-* 攒出 10GB+）
+deploy_current_build() {
+local DEPLOY_DIR="$HOME/.npm-global/lib/node_modules/@agegr/pi-web"
+if [ ! -f .next/BUILD_ID ]; then
+  echo "✗ 当前目录没有 .next 构建产物，先构建：env -u TURBOPACK npx next build --webpack"
+  return 1
+fi
+if [ ! -d "$DEPLOY_DIR" ]; then
+  echo "✗ 安装目录不存在：$DEPLOY_DIR（先 npm install -g @agegr/pi-web 装一份）"
+  return 1
+fi
+  local TS
+  TS=$(date +%Y%m%d-%H%M%S)
+  echo "=== [7/7] 部署到 $DEPLOY_DIR ==="
+  mv "$DEPLOY_DIR/.next" "$DEPLOY_DIR/.next.old-$TS"
+  rsync -a --exclude cache .next/ "$DEPLOY_DIR/.next/"
+  rsync -a package.json package-lock.json next.config.ts "$DEPLOY_DIR/"
+  rsync -a --delete public/ "$DEPLOY_DIR/public/"
+  mv "$DEPLOY_DIR/node_modules" "$DEPLOY_DIR/node_modules.old-$TS"
+  rsync -a --delete node_modules/ "$DEPLOY_DIR/node_modules/"
+  # 内嵌宿主 secret 透传补丁（npm 原版覆盖 node_modules 后必须重打，否则密码框静默变明文）
+  PI_WEB_ROOT="$DEPLOY_DIR" ~/.pi/agent/patches/pi-web-secret-input/apply.sh 2>&1 | tail -2 || echo "⚠ secret 补丁失败，检查 ~/.pi/agent/patches/pi-web-secret-input/"
+  # 备份只留最近 1 份——**必须放在重启之前**：重启会连本脚本一起杀掉（见下），
+  # 放在重启之后就执行不到，旧备份会一路攒到 10GB+（v0.13.0 部署时实测攒了 4 组）。
+  ls -dt "$DEPLOY_DIR"/.next.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
+  ls -dt "$DEPLOY_DIR"/node_modules.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
+
+  # 重启 + 健康检查不能在本脚本里跑。pi-web.service 是 KillMode=control-group，
+  # `systemctl --user restart` 会对整个 cgroup 发 SIGTERM，本脚本是它的子孙进程所以
+  # 一起死——历史实现用 `setsid` 也没用，setsid 只换 session/process group，不换 cgroup。
+  # 只有**不带 --scope** 的瞬态 service 是目标单元的兄弟而非子孙，能活过重启。
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  UNIT="pi-web-deploy-$TS"
+  HEALTH_SCRIPT="/tmp/pi-web-deploy-health-$TS.sh"
+  cat > "$HEALTH_SCRIPT" <<HEALTH
+#!/usr/bin/env bash
+# 由 sync-upstream.sh 的 --deploy 生成，跑在 pi-web.service 之外的瞬态单元里。
+export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}"
+DEPLOY_DIR="$DEPLOY_DIR"
+TS="$TS"
+systemctl --user restart pi-web
+for _ in \$(seq 1 40); do
+  if curl -sf -o /dev/null http://127.0.0.1:30141/; then
+    echo "✓ 部署完成，服务健康：http://127.0.0.1:30141（备份保留一份：.next.old-\$TS）"
+    echo "  pi-web \$(node -p "require('\$DEPLOY_DIR/package.json').version" 2>/dev/null)"
+    echo "  next   \$(node -p "require('\$DEPLOY_DIR/node_modules/next/package.json').version" 2>/dev/null)"
+    echo "  pi SDK \$(node -p "require('\$DEPLOY_DIR/node_modules/@earendil-works/pi-coding-agent/package.json').version" 2>/dev/null)"
+    exit 0
+  fi
+  sleep 2
+done
+echo "✗ 服务未响应，请检查：systemctl --user status pi-web"
+echo "  回滚：mv \$DEPLOY_DIR/.next.old-\$TS \$DEPLOY_DIR/.next; mv \$DEPLOY_DIR/node_modules.old-\$TS \$DEPLOY_DIR/node_modules; systemctl --user restart pi-web"
+exit 1
+HEALTH
+  chmod +x "$HEALTH_SCRIPT"
+  echo "  重启由瞬态单元 $UNIT 执行（本脚本的 cgroup 会被一起杀掉，重启后的步骤不能在这里跑）"
+  systemd-run --user --collect --unit="$UNIT" \
+    --description="pi-web deploy restart + health check ($TS)" \
+    -- bash "$HEALTH_SCRIPT" || { echo "✗ systemd-run 启动瞬态单元失败"; exit 1; }
+  echo "  服务将在数秒后重启，本脚本随之结束——这是正常的。"
+  echo "  查看结果：journalctl --user -u $UNIT -n 20 --no-pager"
+  return 0
+}
 
 # 0) 前置检查
 # 合并进行中（MERGE_HEAD 存在）时允许工作区“脏”：那正是“冲突已解决、准备续跑验证”
@@ -67,6 +149,12 @@ fi
 # `||` 分支永远不会执行——rerere 于是长期处于关闭状态，冲突从不被记忆。
 git config rerere.enabled true
 
+if [ "$DEPLOY_ONLY" = 1 ]; then
+  echo "=== --deploy-only：跳过 fetch/merge/验证，直接部署当前工作树的构建 ==="
+  deploy_current_build
+  exit 0
+fi
+
 # 1) fetch + merge
 if [ "$MERGE_IN_PROGRESS" = 1 ]; then
   echo "=== [1-2/6] 检测到进行中的合并（MERGE_HEAD），跳过 fetch/merge，直接续跑验证 ==="
@@ -81,6 +169,10 @@ else
   echo "upstream: $UPSTREAM_HEAD / fork: $FORK_HEAD"
   if git merge-base --is-ancestor upstream/main main; then
     echo "✓ 本地已包含 upstream/main，无需合并"
+    if [ "$DEPLOY" = "--deploy" ]; then
+      echo "  → 但要求 --deploy：跳过合并与验证，直接部署当前 main 的构建"
+      deploy_current_build
+    fi
     exit 0
   fi
 
@@ -269,60 +361,8 @@ rm -f "$TEST_LOG"
 echo ""
 echo "✓ 合并验证全部通过：upstream $UPSTREAM_HEAD → fork $FORK_HEAD"
 
-# 7) 可选部署：./sync-upstream.sh [--push] --deploy
-#    备份只留最近 1 份（避免 .next.old-* 攒出 10GB+）
-if [ "${2:-}" = "--deploy" ]; then
-  DEPLOY_DIR="$HOME/.npm-global/lib/node_modules/@agegr/pi-web"
-  TS=$(date +%Y%m%d-%H%M%S)
-  echo "=== [7/7] 部署到 $DEPLOY_DIR ==="
-  mv "$DEPLOY_DIR/.next" "$DEPLOY_DIR/.next.old-$TS"
-  rsync -a --exclude cache .next/ "$DEPLOY_DIR/.next/"
-  rsync -a package.json package-lock.json next.config.ts "$DEPLOY_DIR/"
-  rsync -a --delete public/ "$DEPLOY_DIR/public/"
-  mv "$DEPLOY_DIR/node_modules" "$DEPLOY_DIR/node_modules.old-$TS"
-  rsync -a --delete node_modules/ "$DEPLOY_DIR/node_modules/"
-  # 内嵌宿主 secret 透传补丁（npm 原版覆盖 node_modules 后必须重打，否则密码框静默变明文）
-  PI_WEB_ROOT="$DEPLOY_DIR" ~/.pi/agent/patches/pi-web-secret-input/apply.sh 2>&1 | tail -2 || echo "⚠ secret 补丁失败，检查 ~/.pi/agent/patches/pi-web-secret-input/"
-  # 备份只留最近 1 份——**必须放在重启之前**：重启会连本脚本一起杀掉（见下），
-  # 放在重启之后就执行不到，旧备份会一路攒到 10GB+（v0.13.0 部署时实测攒了 4 组）。
-  ls -dt "$DEPLOY_DIR"/.next.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
-  ls -dt "$DEPLOY_DIR"/node_modules.old-* 2>/dev/null | tail -n +2 | xargs -r rm -rf
-
-  # 重启 + 健康检查不能在本脚本里跑。pi-web.service 是 KillMode=control-group，
-  # `systemctl --user restart` 会对整个 cgroup 发 SIGTERM，本脚本是它的子孙进程所以
-  # 一起死——历史实现用 `setsid` 也没用，setsid 只换 session/process group，不换 cgroup。
-  # 只有**不带 --scope** 的瞬态 service 是目标单元的兄弟而非子孙，能活过重启。
-  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-  UNIT="pi-web-deploy-$TS"
-  HEALTH_SCRIPT="/tmp/pi-web-deploy-health-$TS.sh"
-  cat > "$HEALTH_SCRIPT" <<HEALTH
-#!/usr/bin/env bash
-# 由 sync-upstream.sh 的 --deploy 生成，跑在 pi-web.service 之外的瞬态单元里。
-export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}"
-DEPLOY_DIR="$DEPLOY_DIR"
-TS="$TS"
-systemctl --user restart pi-web
-for _ in \$(seq 1 40); do
-  if curl -sf -o /dev/null http://127.0.0.1:30141/; then
-    echo "✓ 部署完成，服务健康：http://127.0.0.1:30141（备份保留一份：.next.old-\$TS）"
-    echo "  pi-web \$(node -p "require('\$DEPLOY_DIR/package.json').version" 2>/dev/null)"
-    echo "  next   \$(node -p "require('\$DEPLOY_DIR/node_modules/next/package.json').version" 2>/dev/null)"
-    echo "  pi SDK \$(node -p "require('\$DEPLOY_DIR/node_modules/@earendil-works/pi-coding-agent/package.json').version" 2>/dev/null)"
-    exit 0
-  fi
-  sleep 2
-done
-echo "✗ 服务未响应，请检查：systemctl --user status pi-web"
-echo "  回滚：mv \$DEPLOY_DIR/.next.old-\$TS \$DEPLOY_DIR/.next; mv \$DEPLOY_DIR/node_modules.old-\$TS \$DEPLOY_DIR/node_modules; systemctl --user restart pi-web"
-exit 1
-HEALTH
-  chmod +x "$HEALTH_SCRIPT"
-  echo "  重启由瞬态单元 $UNIT 执行（本脚本的 cgroup 会被一起杀掉，重启后的步骤不能在这里跑）"
-  systemd-run --user --collect --unit="$UNIT" \
-    --description="pi-web deploy restart + health check ($TS)" \
-    -- bash "$HEALTH_SCRIPT" || { echo "✗ systemd-run 启动瞬态单元失败"; exit 1; }
-  echo "  服务将在数秒后重启，本脚本随之结束——这是正常的。"
-  echo "  查看结果：journalctl --user -u $UNIT -n 20 --no-pager"
+if [ "$DEPLOY" = "--deploy" ]; then
+  deploy_current_build
   exit 0
 fi
 
